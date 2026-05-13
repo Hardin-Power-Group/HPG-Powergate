@@ -1608,13 +1608,13 @@ ${header}
                 <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Type</label><select style={inpSm} value={c.equipment_type} onChange={e=>uEnumComponent(ci,"equipment_type",e.target.value)}><option value="Circuit Breaker">Circuit Breaker</option><option value="Motor Starter">Motor Starter</option><option value="VFD / Drive">VFD / Drive</option><option value="Disconnect Switch">Disconnect Switch</option><option value="Relay">Relay</option><option value="Trip Unit">Trip Unit</option><option value="Other">Other</option></select></div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:6}}>
-                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Mfr</label><input style={inpSm} value={c.manufacturer} onChange={e=>uEnumComponent(ci,"manufacturer",e.target.value)} placeholder="Cutler-Hammer..."/></div>
-                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Model / Cat</label><input style={inpSm} value={c.model_or_type} onChange={e=>uEnumComponent(ci,"model_or_type",e.target.value)} placeholder="FD3030L..."/></div>
+                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Mfr</label><input style={inpSm} value={c.manufacturer} onChange={e=>uEnumComponent(ci,"manufacturer",e.target.value)} placeholder="(not read)"/></div>
+                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Model / Cat</label><input style={inpSm} value={c.model_or_type} onChange={e=>uEnumComponent(ci,"model_or_type",e.target.value)} placeholder="(not read)"/></div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:6}}>
-                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Amps</label><input style={inpSm} value={c.amperage} onChange={e=>uEnumComponent(ci,"amperage",e.target.value)} placeholder="30"/></div>
-                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Poles</label><input style={inpSm} value={c.poles} onChange={e=>uEnumComponent(ci,"poles",e.target.value)} placeholder="3"/></div>
-                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Volts</label><input style={inpSm} value={c.voltage} onChange={e=>uEnumComponent(ci,"voltage",e.target.value)} placeholder="480"/></div>
+                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Amps</label><input style={inpSm} value={c.amperage} onChange={e=>uEnumComponent(ci,"amperage",e.target.value)} placeholder="-"/></div>
+                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Poles</label><input style={inpSm} value={c.poles} onChange={e=>uEnumComponent(ci,"poles",e.target.value)} placeholder="-"/></div>
+                <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Volts</label><input style={inpSm} value={c.voltage} onChange={e=>uEnumComponent(ci,"voltage",e.target.value)} placeholder="-"/></div>
               </div>
               <input style={inpSm} value={c.notes} onChange={e=>uEnumComponent(ci,"notes",e.target.value)} placeholder="Notes (damage, missing handle, etc.)"/>
             </div>
