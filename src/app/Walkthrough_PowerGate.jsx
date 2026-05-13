@@ -1052,6 +1052,14 @@ ${header}
   const [recvSku,setRecvSku]=useState("");
   const [recvBy,setRecvBy]=useState("");
 
+  /* -- Inventory Edit + Delete state -- */
+  const [editModal,setEditModal]=useState(null);
+  const [editForm,setEditForm]=useState({});
+  const [editSaving,setEditSaving]=useState(false);
+  const [deleteConfirm,setDeleteConfirm]=useState(null);
+  const [deleteChecking,setDeleteChecking]=useState(false);
+  const [deleteRunning,setDeleteRunning]=useState(false);
+
   const openReceiveModal=(jobId,lineIdx,item)=>{
     setRecvModal({jobId,lineIdx,item});
     setRecvPutaway(item.putaway_location||"");
@@ -1072,6 +1080,89 @@ ${header}
     setMsg({t:"success",m:`${invId||"Item"} verified. Putaway: ${recvPutaway||"N/A"}`});
     setRecvModal(null);
   };
+
+  /* -- Inventory Edit -- */
+  const openEditInv=(item)=>{
+    setEditModal(item);
+    setEditForm({
+      grade:item.grade||"C",
+      status:item.status||"received",
+      location:item.location||"main_warehouse",
+      location_detail:item.location_detail||"",
+      putaway_location:item.putaway_location||"",
+      barcode_sku:item.barcode_sku||"",
+      serial_number:item.serial_number||"",
+      manufacturer:item.manufacturer||"",
+      model_number:item.model_number||"",
+      catalog_number:item.catalog_number||"",
+      amperage_rating:item.amperage_rating||"",
+      voltage_rating:item.voltage_rating||"",
+      kva_rating:item.kva_rating||"",
+      qty:item.qty||1,
+      condition_notes:item.condition_notes||"",
+    });
+  };
+
+  const uEditForm=(k,v)=>setEditForm(p=>({...p,[k]:v}));
+
+  const saveEditInv=async()=>{
+    if(!editModal)return;
+    setEditSaving(true);
+    const id=editModal.id;
+    const patch={...editForm};
+    Object.keys(patch).forEach(k=>{if(patch[k]==="")patch[k]=null;});
+    if(editModal.tracking_mode==="quantity")patch.qty=parseInt(patch.qty)||1;
+    else delete patch.qty;
+    try{
+      await dbF(`inventory_items?id=eq.${encodeURIComponent(id)}`,{method:"PATCH",body:JSON.stringify(patch)});
+      setInv(prev=>prev.map(r=>r.id===id?{...r,...patch}:r));
+      setMsg({t:"success",m:`${id} updated`});
+      setEditModal(null);
+    }catch(e){
+      setMsg({t:"error",m:"Update failed: "+e.message});
+    }finally{setEditSaving(false);}
+  };
+
+  /* -- Inventory Delete (with reference guards) -- */
+  const startDeleteInv=async(item)=>{
+    setDeleteChecking(true);
+    try{
+      const id=encodeURIComponent(item.id);
+      const [children,lines,asParent]=await Promise.all([
+        dbF(`inventory_items?select=id,position_in_parent&parent_id=eq.${id}`).catch(()=>[]),
+        hpgF(`decomm_traveler_lines?select=id,traveler_id&child_inventory_id=eq.${id}`).catch(()=>[]),
+        hpgF(`decomm_travelers?select=id,traveler_number&parent_inventory_id=eq.${id}`).catch(()=>[]),
+      ]);
+      setDeleteConfirm({item,refs:{children:children||[],lines:lines||[],asParent:asParent||[]}});
+    }catch(e){
+      setMsg({t:"error",m:"Failed to check references: "+e.message});
+    }finally{setDeleteChecking(false);}
+  };
+
+  const confirmDeleteInv=async()=>{
+    if(!deleteConfirm)return;
+    const {item,refs}=deleteConfirm;
+    const hasRefs=refs.children.length>0||refs.lines.length>0||refs.asParent.length>0;
+    if(hasRefs){
+      setMsg({t:"error",m:"Cannot delete: item has dependencies."});
+      return;
+    }
+    setDeleteRunning(true);
+    const id=encodeURIComponent(item.id);
+    try{
+      try{await dbF(`item_photos?reference_id=eq.${id}&reference_type=eq.inventory_item`,{method:"DELETE"});}catch{}
+      try{await dbF(`inventory_subcomponents?inventory_id=eq.${id}`,{method:"DELETE"});}catch{}
+      try{await dbF(`inventory_missing_components?inventory_id=eq.${id}`,{method:"DELETE"});}catch{}
+      await dbF(`inventory_items?id=eq.${id}`,{method:"DELETE"});
+      setInv(prev=>prev.filter(r=>r.id!==item.id));
+      setMsg({t:"success",m:`${item.id} deleted`});
+      setDeleteConfirm(null);
+      setInvExpId(null);
+    }catch(e){
+      setMsg({t:"error",m:"Delete failed: "+e.message});
+    }finally{setDeleteRunning(false);}
+  };
+
 
   const esc=v=>{const s=String(v??"");return s.includes(",")||s.includes('"')?`"${s.replace(/"/g,'""')}"`:s;};
   const exportCSV=(b)=>{
@@ -1643,6 +1734,10 @@ ${header}
                 {r.parent_id&&<div><strong>Parent:</strong> {r.parent_id}{r.position_in_parent?` (Pos ${r.position_in_parent})`:""}</div>}
                 {r.bus_rating&&<div><strong>Bus:</strong> {r.bus_rating}A {r.voltage_class||""}</div>}
                 {r.condition_notes&&<div style={{marginTop:4}}><strong>Notes:</strong> {r.condition_notes}</div>}
+                <div style={{display:"flex",gap:6,marginTop:10}}>
+                  <button onClick={(e)=>{e.stopPropagation();openEditInv(r);}} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #2563eb",background:"#fff",color:"#2563eb",fontSize:12,fontWeight:700,cursor:"pointer"}}>Edit</button>
+                  <button onClick={(e)=>{e.stopPropagation();startDeleteInv(r);}} disabled={deleteChecking} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #dc2626",background:"#fff",color:"#dc2626",fontSize:12,fontWeight:700,cursor:deleteChecking?"wait":"pointer"}}>{deleteChecking?"Checking...":"Delete"}</button>
+                </div>
               </div>}
             </div>
           ));
@@ -1662,6 +1757,130 @@ ${header}
           </div>
         </div>
       </div>}
+
+      {editModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+        <div style={{background:"#fff",borderRadius:14,padding:18,maxWidth:460,width:"100%",maxHeight:"92vh",overflowY:"auto"}}>
+          <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>Edit {editModal.id}</div>
+          <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>{editModal.equipment_type||""} . {editModal.manufacturer||"?"}</div>
+
+          <div style={{marginBottom:10}}>
+            <label style={lbl}>Grade</label>
+            <div style={{display:"flex",gap:4}}>
+              {GRD.map(g=><button key={g.v} onClick={()=>uEditForm("grade",g.v)} style={{flex:1,padding:"10px 0",borderRadius:8,border:`2px solid ${editForm.grade===g.v?g.c:"#e2e8f0"}`,background:editForm.grade===g.v?g.c+"15":"#fff",color:editForm.grade===g.v?g.c:"#94a3b8",fontWeight:800,fontSize:13,cursor:"pointer"}}>{g.v}</button>)}
+            </div>
+          </div>
+
+          <div style={{marginBottom:10}}>
+            <label style={lbl}>Status</label>
+            <select style={inp} value={editForm.status||""} onChange={e=>uEditForm("status",e.target.value)}>
+              <option value="received">received</option>
+              <option value="qc_passed">qc_passed</option>
+              <option value="qc_failed">qc_failed</option>
+              <option value="pending_decomm">pending_decomm</option>
+              <option value="staged_for_ship">staged_for_ship</option>
+              <option value="listed">listed</option>
+              <option value="sold">sold</option>
+              <option value="scrapped">scrapped</option>
+            </select>
+          </div>
+
+          <div style={{marginBottom:10}}>
+            <label style={lbl}>Location</label>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {LOC.map(l=><button key={l.v} onClick={()=>uEditForm("location",l.v)} style={{padding:"7px 10px",borderRadius:6,border:`1.5px solid ${editForm.location===l.v?"#2563eb":"#e2e8f0"}`,background:editForm.location===l.v?"#2563eb15":"#fff",color:editForm.location===l.v?"#2563eb":"#94a3b8",fontWeight:600,fontSize:11,cursor:"pointer"}}>{l.l}</button>)}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+            <div><label style={lbl}>Location Detail</label><input style={inpSm} value={editForm.location_detail||""} onChange={e=>uEditForm("location_detail",e.target.value)} placeholder="Free text"/></div>
+            <div><ScanInput label="Putaway Location" value={editForm.putaway_location} onChange={v=>uEditForm("putaway_location",v)} placeholder="Scan or type..."/></div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+            <div><ScanInput label="SKU / Barcode" value={editForm.barcode_sku} onChange={v=>uEditForm("barcode_sku",v)} placeholder="Scan or assign..."/></div>
+            <div><label style={lbl}>Serial Number</label><input style={inpSm} value={editForm.serial_number||""} onChange={e=>uEditForm("serial_number",e.target.value)} placeholder="UNKNOWN if missing"/></div>
+          </div>
+
+          <div style={{marginBottom:10}}>
+            <label style={lbl}>Manufacturer</label>
+            <select style={inp} value={MFR.includes(editForm.manufacturer)?editForm.manufacturer:""} onChange={e=>uEditForm("manufacturer",e.target.value)}>
+              <option value="">-- pick --</option>
+              {MFR.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+            {editForm.manufacturer&&!MFR.includes(editForm.manufacturer)&&<div style={{fontSize:10,color:"#f59e0b",marginTop:3}}>Current: &quot;{editForm.manufacturer}&quot; (not in list)</div>}
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+            <div><label style={lbl}>Model</label><input style={inpSm} value={editForm.model_number||""} onChange={e=>uEditForm("model_number",e.target.value)}/></div>
+            <div><label style={lbl}>Catalog #</label><input style={inpSm} value={editForm.catalog_number||""} onChange={e=>uEditForm("catalog_number",e.target.value)}/></div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+            <div><label style={lbl}>Amps</label><input style={inpSm} value={editForm.amperage_rating||""} onChange={e=>uEditForm("amperage_rating",e.target.value)}/></div>
+            <div><label style={lbl}>Volts</label><input style={inpSm} value={editForm.voltage_rating||""} onChange={e=>uEditForm("voltage_rating",e.target.value)}/></div>
+            <div><label style={lbl}>KVA</label><input style={inpSm} value={editForm.kva_rating||""} onChange={e=>uEditForm("kva_rating",e.target.value)}/></div>
+          </div>
+
+          {editModal.tracking_mode==="quantity"&&<div style={{marginBottom:10}}>
+            <label style={lbl}>Qty (bulk)</label>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <button onClick={()=>uEditForm("qty",Math.max(1,(parseInt(editForm.qty)||1)-1))} style={{width:44,height:44,borderRadius:8,border:"1.5px solid #2563eb",background:"#fff",color:"#2563eb",fontSize:20,fontWeight:800,cursor:"pointer"}}>-</button>
+              <input type="number" min="1" value={editForm.qty||1} onChange={e=>uEditForm("qty",parseInt(e.target.value)||1)} style={{flex:1,padding:"12px 0",textAlign:"center",border:"2px solid #2563eb",borderRadius:8,fontSize:20,fontWeight:800,color:"#1d4ed8"}}/>
+              <button onClick={()=>uEditForm("qty",(parseInt(editForm.qty)||1)+1)} style={{width:44,height:44,borderRadius:8,border:"1.5px solid #2563eb",background:"#2563eb",color:"#fff",fontSize:20,fontWeight:800,cursor:"pointer"}}>+</button>
+            </div>
+          </div>}
+
+          <div style={{marginBottom:14}}>
+            <label style={lbl}>Condition Notes</label>
+            <textarea style={{...inp,minHeight:60,resize:"vertical"}} value={editForm.condition_notes||""} onChange={e=>uEditForm("condition_notes",e.target.value)} placeholder="Damage, mods, wear..."/>
+          </div>
+
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setEditModal(null)} style={{flex:1,padding:12,borderRadius:8,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:700,cursor:"pointer"}}>Cancel</button>
+            <button onClick={saveEditInv} disabled={editSaving} style={{flex:2,padding:12,borderRadius:8,border:"none",background:editSaving?"#94a3b8":"#2563eb",color:"#fff",fontSize:13,fontWeight:800,cursor:editSaving?"not-allowed":"pointer"}}>{editSaving?"Saving...":"Save Changes"}</button>
+          </div>
+        </div>
+      </div>}
+
+      {deleteConfirm&&(()=>{
+        const {item,refs}=deleteConfirm;
+        const blockers=[];
+        if(refs.children.length>0)blockers.push(`${refs.children.length} child item${refs.children.length===1?"":"s"} (parent_id link)`);
+        if(refs.lines.length>0)blockers.push(`${refs.lines.length} decomm traveler line${refs.lines.length===1?"":"s"}`);
+        if(refs.asParent.length>0)blockers.push(`${refs.asParent.length} decomm traveler${refs.asParent.length===1?"":"s"} (${refs.asParent.map(t=>t.traveler_number).join(", ")})`);
+        const hasBlockers=blockers.length>0;
+        return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:"#fff",borderRadius:14,padding:20,maxWidth:420,width:"100%"}}>
+            <div style={{fontSize:16,fontWeight:800,marginBottom:6,color:hasBlockers?"#dc2626":"#1e293b"}}>{hasBlockers?"Cannot Delete":"Confirm Delete"}</div>
+            <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>{item.id} . {item.equipment_type||""}{item.manufacturer?" . "+item.manufacturer:""}</div>
+            {hasBlockers?<>
+              <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:12,marginBottom:14}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#991b1b",marginBottom:6}}>This item has dependencies:</div>
+                <ul style={{margin:0,paddingLeft:18,fontSize:11,color:"#7f1d1d"}}>
+                  {blockers.map((b,i)=><li key={i} style={{marginBottom:2}}>{b}</li>)}
+                </ul>
+                <div style={{fontSize:11,color:"#7f1d1d",marginTop:8}}>Resolve those records first, then retry.</div>
+              </div>
+              <button onClick={()=>setDeleteConfirm(null)} style={{width:"100%",boxSizing:"border-box",padding:12,borderRadius:8,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:700,cursor:"pointer"}}>Close</button>
+            </>:<>
+              <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:12,marginBottom:14,fontSize:12,color:"#7f1d1d"}}>
+                <div style={{fontWeight:700,marginBottom:4}}>This will permanently delete:</div>
+                <ul style={{margin:0,paddingLeft:18}}>
+                  <li>The inventory row</li>
+                  <li>All photos (item_photos)</li>
+                  <li>All subcomponents (breakers, etc.)</li>
+                  <li>All missing-component records</li>
+                </ul>
+                <div style={{marginTop:8,fontWeight:700}}>Cannot be undone.</div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setDeleteConfirm(null)} disabled={deleteRunning} style={{flex:1,padding:12,borderRadius:8,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:700,cursor:deleteRunning?"not-allowed":"pointer"}}>Cancel</button>
+                <button onClick={confirmDeleteInv} disabled={deleteRunning} style={{flex:2,padding:12,borderRadius:8,border:"none",background:deleteRunning?"#94a3b8":"#dc2626",color:"#fff",fontSize:13,fontWeight:800,cursor:deleteRunning?"not-allowed":"pointer"}}>{deleteRunning?"Deleting...":"Confirm Delete"}</button>
+              </div>
+            </>}
+          </div>
+        </div>;
+      })()}
     </div>
   );
 }
