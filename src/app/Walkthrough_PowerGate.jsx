@@ -1599,9 +1599,15 @@ ${header}
           </div>
 
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            {ENUM_PARENT_TYPES.has(qcItem.equipmentType)&&<button onClick={startEnumerate} style={{padding:18,borderRadius:12,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>Enumerate components &amp; issue traveler &rarr;</button>}
-            <button onClick={()=>handleQuickReceive("next")} style={{padding:18,borderRadius:12,border:"none",background:mode==="receive"?"linear-gradient(135deg,#16a34a,#15803d)":"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer"}}>{ENUM_PARENT_TYPES.has(qcItem.equipmentType)?"Receive parent only &amp; Capture Next \u2192":"Receive &amp; Capture Next \u2192"}</button>
-            <button onClick={()=>handleQuickReceive("finish")} style={{padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer"}}>{ENUM_PARENT_TYPES.has(qcItem.equipmentType)?"Receive parent only &amp; Finish Session":"Receive &amp; Finish Session"}</button>
+            {ENUM_PARENT_TYPES.has(qcItem.equipmentType)?<>
+              <button onClick={startEnumerate} style={{padding:18,borderRadius:12,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",boxShadow:"0 2px 6px rgba(124,58,237,0.3)"}}>Enumerate Components & Issue Traveler →</button>
+              <div style={{fontSize:11,color:"#6b7280",textAlign:"center",margin:"2px 0"}}>or skip enumeration</div>
+              <button onClick={()=>handleQuickReceive("next")} style={{padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer"}}>Receive parent only & Capture Next →</button>
+              <button onClick={()=>handleQuickReceive("finish")} style={{padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer"}}>Receive parent only & Finish Session</button>
+            </>:<>
+              <button onClick={()=>handleQuickReceive("next")} style={{padding:18,borderRadius:12,border:"none",background:mode==="receive"?"linear-gradient(135deg,#16a34a,#15803d)":"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer"}}>Receive & Capture Next →</button>
+              <button onClick={()=>handleQuickReceive("finish")} style={{padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer"}}>Receive & Finish Session</button>
+            </>}
             <button onClick={()=>{setQcItem(null);setQcPhase("capture");}} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Retake / Discard</button>
           </div>
         </div>}
@@ -1663,7 +1669,7 @@ ${header}
 
         {qcPhase==="enumerate_review"&&<div>
           <div style={card}>
-            <div style={{fontSize:11,fontWeight:700,color:"#7c3aed",marginBottom:8,letterSpacing:1}}>REVIEW &amp; EDIT COMPONENTS</div>
+            <div style={{fontSize:11,fontWeight:700,color:"#7c3aed",marginBottom:8,letterSpacing:1}}>REVIEW & EDIT COMPONENTS</div>
             {enumPhotos.length>0&&<div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:6,marginBottom:12}}>
               {enumPhotos.map((p,i)=>(
                 <div key={i} style={{position:"relative",flexShrink:0}}>
@@ -1706,7 +1712,7 @@ ${header}
           <button onClick={addEnumComponent} style={{width:"100%",boxSizing:"border-box",padding:12,borderRadius:10,border:"2px dashed #7c3aed",background:"#faf5ff",color:"#7c3aed",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:12}}>+ Add Component Manually</button>
 
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <button onClick={handleEnumerateSave} disabled={enumComponents.length===0} style={{padding:18,borderRadius:12,border:"none",background:enumComponents.length===0?"#94a3b8":"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:16,fontWeight:800,cursor:enumComponents.length===0?"not-allowed":"pointer"}}>Save &amp; Issue Traveler</button>
+            <button onClick={handleEnumerateSave} disabled={enumComponents.length===0} style={{padding:18,borderRadius:12,border:"none",background:enumComponents.length===0?"#94a3b8":"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:16,fontWeight:800,cursor:enumComponents.length===0?"not-allowed":"pointer"}}>Save & Issue Traveler</button>
             <button onClick={()=>setQcPhase("enumerate_capture")} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Recapture Lineup</button>
             <button onClick={()=>{setEnumComponents([]);setEnumPhotos([]);setEnumParentObs(null);setQcPhase("review");}} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel . Back to parent review</button>
           </div>
@@ -1764,7 +1770,7 @@ ${header}
                   </div>
                   <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{it.amperage_rating||it.amperageRating?(it.amperage_rating||it.amperageRating)+"A":""} {it.voltage_rating||it.voltageRating?(it.voltage_rating||it.voltageRating)+"V":""} {it.kva_rating||it.kvaRating?(it.kva_rating||it.kvaRating)+"KVA":""} . S/N: {it.serial_number||it.serialNumber||"N/A"}</div>
                   {(j.mode==="pickup"||j.mode==="walkthrough")&&it.pickup_status!=="completed"&&<button onClick={()=>pickupItem(j,it,ii)} style={{marginTop:6,padding:"6px 12px",borderRadius:6,border:"none",background:"#16a34a",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>Mark Picked Up &rarr; Inventory</button>}
-                  {it.pickup_status==="completed"&&it.receive_status!=="verified"&&<button onClick={()=>openReceiveModal(j.id,ii,it)} style={{marginTop:6,padding:"6px 12px",borderRadius:6,border:"none",background:"#2563eb",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>Verify Receive &amp; Putaway</button>}
+                  {it.pickup_status==="completed"&&it.receive_status!=="verified"&&<button onClick={()=>openReceiveModal(j.id,ii,it)} style={{marginTop:6,padding:"6px 12px",borderRadius:6,border:"none",background:"#2563eb",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>Verify Receive & Putaway</button>}
                 </div>
               ))}
               <div style={{display:"flex",gap:6,marginTop:8}}>
@@ -1829,7 +1835,7 @@ ${header}
 
       {recvModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
         <div style={{background:"#fff",borderRadius:14,padding:20,maxWidth:420,width:"100%",maxHeight:"90vh",overflowY:"auto"}}>
-          <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>Verify Receive &amp; Putaway</div>
+          <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>Verify Receive & Putaway</div>
           <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>{recvModal.item.equipment_type||recvModal.item.equipmentType} . {recvModal.item.inventory_id||""}</div>
           <div style={{marginBottom:10}}><label style={lbl}>Verified By *</label><input style={inp} value={recvBy} onChange={e=>setRecvBy(e.target.value)} placeholder="Your name"/></div>
           <div style={{marginBottom:10}}><ScanInput label="Putaway Location" value={recvPutaway} onChange={setRecvPutaway} placeholder="Scan or type bin/rack..."/></div>
