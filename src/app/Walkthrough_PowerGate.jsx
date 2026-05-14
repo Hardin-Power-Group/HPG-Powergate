@@ -496,7 +496,7 @@ export default function Walkthrough() {
     setTimeout(()=>enumFileRef.current?.click(),100);
   };
 
-  const handleEnumerateCapture=async(file)=>{
+  const handleEnumerateCapture=async(file,opts={})=>{
     if(!file)return;
     setMsg(null);
     try{
@@ -520,6 +520,13 @@ export default function Walkthrough() {
           setEnumPhotos(prev=>prev.map(p=>p.b64===b64?{...p,uploading:false}:p));
         }
       })();
+      // Auto reopen camera for next shot (only if came from camera, not gallery, and not at cap)
+      if(opts.fromCamera){
+        setEnumPhotos(prev=>{
+          if(prev.length<8){setTimeout(()=>enumFileRef.current?.click(),350);}
+          return prev;
+        });
+      }
     }catch(e){
       setMsg({t:"error",m:"Capture failed: "+e.message});
     }
@@ -1612,8 +1619,8 @@ ${header}
             <div style={{fontSize:16,fontWeight:800,marginBottom:6}}>{enumPhotos.length===0?"Photograph the open front face":"Add more sections or analyze"}</div>
             <div style={{fontSize:12,color:"#6b7280",marginBottom:16,padding:"0 8px"}}>
               {enumPhotos.length===0
-                ?"Wide MCC or switchgear? Capture multiple overlapping shots (left, middle, right), or upload several photos at once from your gallery. AI merges them into one continuous lineup."
-                :`${enumPhotos.length} photo${enumPhotos.length===1?"":"s"} captured. Add more from camera or gallery, or analyze all to build the traveler.`}
+                ?"Wide MCC or switchgear? Take one shot of each section; camera reopens automatically so you can keep shooting. Or upload several at once from your gallery. AI merges them into one continuous lineup."
+                :`${enumPhotos.length} photo${enumPhotos.length===1?"":"s"} captured. Take another, upload more from gallery, or tap DONE when finished.`}
             </div>
 
             {enumPhotos.length>0&&<div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:6,marginBottom:14}}>
@@ -1629,17 +1636,17 @@ ${header}
 
             <div style={{display:"flex",gap:8,marginBottom:8}}>
               <label style={{flex:1,boxSizing:"border-box",padding:"18px 8px",borderRadius:14,background:enumPhotos.length===0?"linear-gradient(135deg,#7c3aed,#5b21b6)":"#fff",border:enumPhotos.length===0?"none":"2px dashed #7c3aed",color:enumPhotos.length===0?"#fff":"#7c3aed",fontSize:13,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
-                <input ref={enumFileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)handleEnumerateCapture(f);}}/>
-                [CAM] {enumPhotos.length===0?"CAPTURE":"+ CAMERA"}
+                <input ref={enumFileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)handleEnumerateCapture(f,{fromCamera:true});}}/>
+                [CAM] {enumPhotos.length===0?"CAPTURE":"TAKE ANOTHER"}
               </label>
-              <label style={{flex:1,boxSizing:"border-box",padding:"18px 8px",borderRadius:14,background:enumPhotos.length===0?"#fff":"#fff",border:"2px dashed #7c3aed",color:"#7c3aed",fontSize:13,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
+              <label style={{flex:1,boxSizing:"border-box",padding:"18px 8px",borderRadius:14,background:"#fff",border:"2px dashed #7c3aed",color:"#7c3aed",fontSize:13,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
                 <input ref={enumGalleryRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";if(fs&&fs.length>0)handleEnumerateBatchCapture(fs);}}/>
                 [GAL] UPLOAD
               </label>
             </div>
 
-            {enumPhotos.length>0&&<button onClick={handleEnumerateAnalyze} style={{width:"100%",boxSizing:"border-box",padding:"18px 16px",borderRadius:14,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",marginBottom:8}}>
-              ANALYZE {enumPhotos.length} PHOTO{enumPhotos.length===1?"":"S"} &rarr;
+            {enumPhotos.length>0&&<button onClick={handleEnumerateAnalyze} style={{width:"100%",boxSizing:"border-box",padding:"20px 16px",borderRadius:14,border:"none",background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",marginBottom:8,boxShadow:"0 2px 6px rgba(22,163,74,0.3)"}}>
+              DONE . ANALYZE {enumPhotos.length} PHOTO{enumPhotos.length===1?"":"S"} &rarr;
             </button>}
 
             <button onClick={()=>{setEnumPhotos([]);setQcPhase("review");}} style={{marginTop:4,padding:"10px 18px",borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel . Back to parent review</button>
