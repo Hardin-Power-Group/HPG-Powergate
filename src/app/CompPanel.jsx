@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 const SB = "https://ulyycjtrshpsjpvbztkr.supabase.co";
 const FN = (n) => `${SB}/functions/v1/${n}`;
 
-function buildQuery(item) {
+export function buildQuery(item) {
   if (!item) return "";
   const p = [];
   const mfr = item.manufacturer || "";

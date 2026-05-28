@@ -1,5 +1,5 @@
 "use client";
-import CompPanel from "./CompPanel";
+import CompPanel, { buildQuery } from "./CompPanel";
 import { useState, useEffect, useCallback, useRef } from "react";
 
 /* -- Logo Components ------------------------------------- */
@@ -45,6 +45,32 @@ const H={apikey:SK,Authorization:`Bearer ${SK}`,"Content-Type":"application/json
 let loc=false;
 async function dbF(p,o={}){const r=await fetch(`${SB}/rest/v1/${p}`,{...o,headers:{...H,...(o.headers||{})}});if(!r.ok)throw new Error(`${r.status}`);const t=await r.text();return t?JSON.parse(t):null;}
 async function hpgF(p,o={}){const isWrite=o.method&&o.method!=="GET";const profKey=isWrite?"Content-Profile":"Accept-Profile";return dbF(p,{...o,headers:{...(o.headers||{}),[profKey]:"hpg"}});}
+/* -- Comp snapshot at intake (best-effort, non-blocking; needs comp_snapshots table) -- */
+const GRADE_MULT={A:1.0,B:0.75,C:0.45,D:0.15};
+async function captureCompSnapshot(invId,item){
+  try{
+    const query=buildQuery(item);
+    if(query.split(" ").filter(Boolean).length<2)return; // too thin to be meaningful
+    const fn=(n)=>`${SB}/functions/v1/${n}`;
+    const [eb,wb]=await Promise.allSettled([
+      fetch(fn("ebay-comps"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query})}).then(r=>r.json()),
+      fetch(fn("web-comps"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,num:10})}).then(r=>r.json()),
+    ]);
+    const es=(eb.status==="fulfilled"&&eb.value&&eb.value.stats)?eb.value.stats:null;
+    const ws=(wb.status==="fulfilled"&&wb.value&&wb.value.stats)?wb.value.stats:null;
+    if(!es&&!ws)return; // nothing found, skip noise row
+    const grade=item.grade||"B";
+    const gm=GRADE_MULT[grade]||0.75;
+    const medians=[es&&es.median,ws&&ws.median].filter(v=>v!=null&&v>0);
+    const recommended=medians.length?Math.round((medians.reduce((a,b)=>a+b,0)/medians.length)*gm):null;
+    await dbF("comp_snapshots",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({
+      inventory_id:invId,query,grade,grade_multiplier:gm,recommended_price:recommended,
+      ebay_count:es?es.count??null:null,ebay_low:es?es.low??null:null,ebay_median:es?es.median??null:null,ebay_high:es?es.high??null:null,
+      web_count:ws?ws.count??null:null,web_low:ws?ws.low??null:null,web_median:ws?ws.median??null:null,web_high:ws?ws.high??null:null,
+      source:"intake",
+    })});
+  }catch{}
+}
 async function sG(k){try{if(typeof window!=="undefined"&&window.storage){const r=await window.storage.get(k);return r?JSON.parse(r.value):null;}}catch{}return null;}
 async function sS(k,v){try{if(typeof window!=="undefined"&&window.storage)await window.storage.set(k,JSON.stringify(v));}catch{}}
 
@@ -241,7 +267,7 @@ export default function Walkthrough() {
   const loadInventory=useCallback(async()=>{
     setInvLoading(true);
     try{
-      if(!loc){const data=await dbF("inventory_items?select=*&order=created_at.desc&limit=200");if(data)setInv(data);}
+      if(!loc){const data=await dbF("inventory_items?select=*,comp_snapshots(recommended_price,created_at,ebay_count,web_count)&order=created_at.desc&comp_snapshots.order=created_at.desc&limit=200");if(data)setInv(data);}
       else{const local=await sG("wes_inventory");if(local)setInv(local);}
     }catch{}
     setInvLoading(false);
@@ -262,6 +288,7 @@ export default function Walkthrough() {
   const [enumParentObs,setEnumParentObs]=useState(null);
   const [enumPhotos,setEnumPhotos]=useState([]); // array of {dataUrl, b64, photoUrl, uploading}
   const [enumLastTraveler,setEnumLastTraveler]=useState(null);
+  const [bulkIntake,setBulkIntake]=useState(false); // true = gallery dump -> standalone items, no parent/traveler
   const enumFileRef=useRef(null);
   const enumGalleryRef=useRef(null);
 
@@ -476,6 +503,7 @@ export default function Walkthrough() {
           await dbF("item_photos",{method:"POST",body:JSON.stringify({reference_id:invId,reference_type:"inventory_item",photo_url:qcItem.photo,photo_role:"nameplate",is_ebay_ready:false})});
         }catch{}}
         ok=true;
+        captureCompSnapshot(invId,invRow); // non-blocking
       }catch{loc=true;}}
       if(!ok){const stored=await sG("wes_inv")||[];await sS("wes_inv",[{...invRow,_photo:qcItem.photo,created_at:new Date().toISOString()},...stored]);}
       setQcSession(prev=>[...prev,{...invRow,_photo:qcItem.photo}]);
@@ -675,6 +703,62 @@ export default function Walkthrough() {
       setQcItem(null);setEnumComponents([]);setEnumPhotos([]);setEnumParentObs(null);
       setMsg({t:"success",m:`${travelerNumber} created with ${childRows.length} component${childRows.length===1?"":"s"}`});
       setQcPhase("enumerate_success");
+    }catch(e){
+      setMsg({t:"error",m:"Save failed: "+e.message});
+      setQcPhase("enumerate_review");
+    }
+  };
+
+  /* === BULK INTAKE SAVE (standalone items, no parent, no traveler) === */
+  const handleBulkIntakeSave=async()=>{
+    if(enumComponents.length===0){setMsg({t:"error",m:"No components to save. Add at least one or cancel."});return;}
+    if(mode==="quick"&&!qcLocationCode.trim()){setMsg({t:"error",m:"Set location first"});setQcPhase("location");return;}
+    if(mode==="receive"&&!job.preparedBy.trim()){setMsg({t:"error",m:"Received By required"});setQcPhase("location");return;}
+    setQcPhase("enumerate_saving");
+    try{
+      const issuedByLabel=mode==="receive"?(job.preparedBy||"receive"):"quick_capture";
+      const dateRecv=mode==="receive"?(job.bidDate||today()):today();
+      // resolve the uploaded photo a component came from (source_image is 1-based photo number)
+      const photoUrlFor=(c)=>{
+        const n=parseInt(String(c.source_image==null?"":c.source_image).replace(/\D/g,""));
+        if(!n||n<1||n>enumPhotos.length)return null;
+        const ph=enumPhotos[n-1];
+        return (ph&&ph.photoUrl&&ph.photoUrl.startsWith(SB))?ph.photoUrl:null;
+      };
+      const rows=enumComponents.map((c,idx)=>{
+        const cid=`INV-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2,5)}${idx.toString(36)}`;
+        const note=[c.position?`Lineup pos ${c.position}`:"",c.notes||""].filter(Boolean).join(". ")||null;
+        return {
+          id:cid,tracking_mode:"serialized",qty:1,serial_number:"UNKNOWN",
+          equipment_type:c.equipment_type||"Circuit Breaker",
+          manufacturer:c.manufacturer||null,
+          model_number:c.model_or_type||null,catalog_number:c.model_or_type||null,
+          amperage_rating:c.amperage||null,voltage_rating:c.voltage||null,
+          grade:c.grade||"C",location:"main_warehouse",
+          location_detail:mode==="quick"?qcLocationCode.trim():null,
+          customer_origin:mode==="receive"?(job.customerName||null):null,
+          source_job_site:mode==="receive"?(job.jobName||null):null,
+          status:"received",physical_state:"on_shelf",parent_id:null,
+          date_received:dateRecv,scanned_by:issuedByLabel,
+          condition_notes:note,
+          received_verified:true,verified_by:issuedByLabel,verified_date:dateRecv,
+          _photo:photoUrlFor(c),
+        };
+      });
+      const dbRows=rows.map(({_photo,...r})=>r);
+      await dbF("inventory_items",{method:"POST",body:JSON.stringify(dbRows)});
+      for(const r of rows){
+        if(r._photo){try{
+          await dbF("item_photos",{method:"POST",body:JSON.stringify({reference_id:r.id,reference_type:"inventory_item",photo_url:r._photo,photo_role:"item",is_ebay_ready:false})});
+        }catch{}}
+      }
+      setQcSession(prev=>[...prev,...rows]);
+      // best-effort comp snapshots, sequential in background so save returns immediately
+      (async()=>{for(const r of dbRows){await captureCompSnapshot(r.id,r);}})();
+      const n=rows.length;
+      setEnumComponents([]);setEnumPhotos([]);setEnumParentObs(null);setBulkIntake(false);
+      setMsg({t:"success",m:`${n} item${n===1?"":"s"} received from gallery batch.`});
+      setQcPhase("capture");
     }catch(e){
       setMsg({t:"error",m:"Save failed: "+e.message});
       setQcPhase("enumerate_review");
@@ -1521,6 +1605,11 @@ ${header}
                 <input ref={qcFileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)handleQuickScan(f);}}/>
                 CAPTURE ITEM
               </label>
+              <label style={{display:"block",boxSizing:"border-box",width:"100%",marginTop:10,padding:"14px 16px",borderRadius:14,background:"#fff",border:"2px dashed #7c3aed",color:"#7c3aed",fontSize:13,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
+                <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";if(fs&&fs.length>0){setBulkIntake(true);setEnumComponents([]);setEnumParentObs(null);setEnumPhotos([]);setQcPhase("enumerate_capture");handleEnumerateBatchCapture(fs);}}}/>
+                [GAL] BULK INTAKE FROM GALLERY / DOWNLOADS
+              </label>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:6}}>Dump multiple photos. AI builds a component list. Each row saves as its own received item.</div>
             </div>
           </div>
           {qcSession.length>0&&<button onClick={printSessionSummary} style={{width:"100%",boxSizing:"border-box",padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer",marginBottom:8}}>Print Session Summary ({qcSession.length} item{qcSession.length===1?"":"s"})</button>}
@@ -1655,7 +1744,7 @@ ${header}
               DONE . ANALYZE {enumPhotos.length} PHOTO{enumPhotos.length===1?"":"S"} &rarr;
             </button>}
 
-            <button onClick={()=>{setEnumPhotos([]);setQcPhase("review");}} style={{marginTop:4,padding:"10px 18px",borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel . Back to parent review</button>
+            <button onClick={()=>{setEnumPhotos([]);if(bulkIntake){setBulkIntake(false);setQcPhase("capture");}else{setQcPhase("review");}}} style={{marginTop:4,padding:"10px 18px",borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>{bulkIntake?"Cancel . Back to capture":"Cancel . Back to parent review"}</button>
           </div>
         </div>}
 
@@ -1712,17 +1801,17 @@ ${header}
           <button onClick={addEnumComponent} style={{width:"100%",boxSizing:"border-box",padding:12,borderRadius:10,border:"2px dashed #7c3aed",background:"#faf5ff",color:"#7c3aed",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:12}}>+ Add Component Manually</button>
 
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <button onClick={handleEnumerateSave} disabled={enumComponents.length===0} style={{padding:18,borderRadius:12,border:"none",background:enumComponents.length===0?"#94a3b8":"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:16,fontWeight:800,cursor:enumComponents.length===0?"not-allowed":"pointer"}}>Save & Issue Traveler</button>
-            <button onClick={()=>setQcPhase("enumerate_capture")} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Recapture Lineup</button>
-            <button onClick={()=>{setEnumComponents([]);setEnumPhotos([]);setEnumParentObs(null);setQcPhase("review");}} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel . Back to parent review</button>
+            <button onClick={bulkIntake?handleBulkIntakeSave:handleEnumerateSave} disabled={enumComponents.length===0} style={{padding:18,borderRadius:12,border:"none",background:enumComponents.length===0?"#94a3b8":"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontSize:16,fontWeight:800,cursor:enumComponents.length===0?"not-allowed":"pointer"}}>{bulkIntake?`Save ${enumComponents.length} Item${enumComponents.length===1?"":"s"} to Inventory`:"Save & Issue Traveler"}</button>
+            <button onClick={()=>setQcPhase("enumerate_capture")} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>{bulkIntake?"Add / Recapture Photos":"Recapture Lineup"}</button>
+            <button onClick={()=>{setEnumComponents([]);setEnumPhotos([]);setEnumParentObs(null);if(bulkIntake){setBulkIntake(false);setQcPhase("capture");}else{setQcPhase("review");}}} style={{padding:12,borderRadius:10,border:"1px solid #d1d5db",background:"#fff",color:"#64748b",fontSize:13,fontWeight:600,cursor:"pointer"}}>{bulkIntake?"Cancel . Discard batch":"Cancel . Back to parent review"}</button>
           </div>
         </div>}
 
         {qcPhase==="enumerate_saving"&&<div style={card}>
           <div style={{textAlign:"center",padding:"40px 0"}}>
             <div style={{fontSize:36,marginBottom:12}}>...</div>
-            <div style={{fontSize:16,fontWeight:700,color:"#7c3aed"}}>Issuing traveler...</div>
-            <div style={{fontSize:12,color:"#6b7280",marginTop:6}}>Creating parent, child records, traveler header and lines</div>
+            <div style={{fontSize:16,fontWeight:700,color:"#7c3aed"}}>{bulkIntake?"Saving items...":"Issuing traveler..."}</div>
+            <div style={{fontSize:12,color:"#6b7280",marginTop:6}}>{bulkIntake?"Writing standalone inventory records and photos":"Creating parent, child records, traveler header and lines"}</div>
           </div>
         </div>}
 
@@ -1827,6 +1916,8 @@ ${header}
                   <button onClick={(e)=>{e.stopPropagation();openEditInv(r);}} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #2563eb",background:"#fff",color:"#2563eb",fontSize:12,fontWeight:700,cursor:"pointer"}}>Edit</button>
                   <button onClick={(e)=>{e.stopPropagation();startDeleteInv(r);}} disabled={deleteChecking} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #dc2626",background:"#fff",color:"#dc2626",fontSize:12,fontWeight:700,cursor:deleteChecking?"wait":"pointer"}}>{deleteChecking?"Checking...":"Delete"}</button>
                 </div>
+                {(()=>{const cs=r.comp_snapshots&&r.comp_snapshots[0];return cs&&cs.recommended_price!=null?(<div style={{marginTop:8,padding:"8px 12px",borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,color:"#64748b",fontWeight:600}}>Comp at intake{cs.created_at?` . ${String(cs.created_at).slice(0,10)}`:""}{(cs.ebay_count||cs.web_count)?` . ${cs.ebay_count||0} eBay / ${cs.web_count||0} dealer`:""}</span><span style={{fontSize:14,fontWeight:800,color:"#059669",fontFamily:"monospace"}}>${Number(cs.recommended_price).toLocaleString()}</span></div>):null;})()}
+                <CompPanel item={r} />
               </div>}
             </div>
           ));
