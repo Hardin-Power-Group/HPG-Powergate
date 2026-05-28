@@ -1321,7 +1321,7 @@ ${header}
             {!it.serialNumber&&<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"#eff6ff",borderRadius:8,marginBottom:8,border:"1px solid #bfdbfe"}}>
               <span style={{fontSize:11,fontWeight:700,color:"#1d4ed8",flex:1}}>No S/N . Qty</span>
               <button onClick={()=>uItem(i,"quantity",Math.max(1,(it.quantity||1)-1))} style={{width:32,height:32,borderRadius:6,border:"1.5px solid #bfdbfe",background:"#fff",fontWeight:800,fontSize:18,cursor:"pointer",lineHeight:1,color:"#1d4ed8"}}>-</button>
-              <input type="number" min="1" value={it.quantity||1} onChange={e=>uItem(i,"quantity",parseInt(e.target.value)||1)} style={{width:56,textAlign:"center",padding:"6px 0",border:"2px solid #2563eb",borderRadius:8,fontSize:18,fontWeight:800,color:"#1d4ed8",background:"#fff"}}/>
+              <input type="number" inputMode="numeric" min="1" value={it.quantity===""?"":(it.quantity||1)} onFocus={e=>e.target.select()} onChange={e=>{const v=e.target.value;uItem(i,"quantity",v===""?"":(parseInt(v)||1));}} onBlur={e=>{if(e.target.value===""||parseInt(e.target.value)<1)uItem(i,"quantity",1);}} style={{width:56,minWidth:0,boxSizing:"border-box",WebkitAppearance:"none",MozAppearance:"textfield",textAlign:"center",padding:"6px 0",border:"2px solid #2563eb",borderRadius:8,fontSize:18,fontWeight:800,color:"#1d4ed8",background:"#fff"}}/>
               <button onClick={()=>uItem(i,"quantity",(it.quantity||1)+1)} style={{width:32,height:32,borderRadius:6,border:"1.5px solid #bfdbfe",background:"#fff",fontWeight:800,fontSize:18,cursor:"pointer",lineHeight:1,color:"#1d4ed8"}}>+</button>
               <span style={{fontSize:10,color:"#6b7280"}}>units</span>
             </div>}
@@ -1587,7 +1587,7 @@ ${header}
               <label style={lbl}>Quantity *</label>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <button onClick={()=>setQcItem(i=>({...i,qty:Math.max(1,(parseInt(i.qty)||1)-1)}))} style={{width:56,height:56,borderRadius:12,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:24,fontWeight:800,cursor:"pointer"}}>-</button>
-                <input type="number" min="1" value={qcItem.qty} onChange={e=>setQcItem(i=>({...i,qty:parseInt(e.target.value)||1}))} style={{flex:1,padding:"14px 0",textAlign:"center",border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,borderRadius:12,fontSize:28,fontWeight:800,color:mode==="receive"?"#16a34a":"#0891b2"}}/>
+                <input type="number" inputMode="numeric" min="1" value={qcItem.qty===""?"":(qcItem.qty||1)} onFocus={e=>e.target.select()} onChange={e=>{const v=e.target.value;setQcItem(i=>({...i,qty:v===""?"":(parseInt(v)||1)}));}} onBlur={e=>{if(e.target.value===""||parseInt(e.target.value)<1)setQcItem(i=>({...i,qty:1}));}} style={{flex:1,minWidth:0,boxSizing:"border-box",WebkitAppearance:"none",MozAppearance:"textfield",padding:"14px 0",textAlign:"center",border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,borderRadius:12,fontSize:28,fontWeight:800,color:mode==="receive"?"#16a34a":"#0891b2"}}/>
                 <button onClick={()=>setQcItem(i=>({...i,qty:(parseInt(i.qty)||1)+1}))} style={{width:56,height:56,borderRadius:12,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:mode==="receive"?"#16a34a":"#0891b2",color:"#fff",fontSize:24,fontWeight:800,cursor:"pointer"}}>+</button>
               </div>
               <div style={{fontSize:11,color:"#6b7280",marginTop:6}}>Bulk item. Stored as one row with count.</div>
@@ -1914,7 +1914,7 @@ ${header}
             <label style={lbl}>Qty (bulk)</label>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <button onClick={()=>uEditForm("qty",Math.max(1,(parseInt(editForm.qty)||1)-1))} style={{width:44,height:44,borderRadius:8,border:"1.5px solid #2563eb",background:"#fff",color:"#2563eb",fontSize:20,fontWeight:800,cursor:"pointer"}}>-</button>
-              <input type="number" min="1" value={editForm.qty||1} onChange={e=>uEditForm("qty",parseInt(e.target.value)||1)} style={{flex:1,padding:"12px 0",textAlign:"center",border:"2px solid #2563eb",borderRadius:8,fontSize:20,fontWeight:800,color:"#1d4ed8"}}/>
+              <input type="number" inputMode="numeric" min="1" value={editForm.qty===""?"":(editForm.qty||1)} onFocus={e=>e.target.select()} onChange={e=>{const v=e.target.value;uEditForm("qty",v===""?"":(parseInt(v)||1));}} onBlur={e=>{if(e.target.value===""||parseInt(e.target.value)<1)uEditForm("qty",1);}} style={{flex:1,minWidth:0,boxSizing:"border-box",WebkitAppearance:"none",MozAppearance:"textfield",padding:"12px 0",textAlign:"center",border:"2px solid #2563eb",borderRadius:8,fontSize:20,fontWeight:800,color:"#1d4ed8"}}/>
               <button onClick={()=>uEditForm("qty",(parseInt(editForm.qty)||1)+1)} style={{width:44,height:44,borderRadius:8,border:"1.5px solid #2563eb",background:"#2563eb",color:"#fff",fontSize:20,fontWeight:800,cursor:"pointer"}}>+</button>
             </div>
           </div>}
