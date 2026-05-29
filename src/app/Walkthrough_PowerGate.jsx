@@ -273,6 +273,70 @@ export default function Walkthrough() {
     setInvLoading(false);
   },[]);
 
+  /* === PUTAWAY MODE ===
+     Lists items currently at the dock (physical_state='on_dock').
+     Tech picks one, enters a rack/bay code, app moves it to on_shelf with that location.
+  */
+  const [putawayQueue,setPutawayQueue]=useState([]);
+  const [putawayLoading,setPutawayLoading]=useState(false);
+  const [putawayItem,setPutawayItem]=useState(null);
+  const [putawayLoc,setPutawayLoc]=useState("");
+  const [putawayBusy,setPutawayBusy]=useState(false);
+  const [putawayLastDone,setPutawayLastDone]=useState(null); // {id,prevLoc} for undo
+  const loadPutawayQueue=useCallback(async()=>{
+    setPutawayLoading(true);
+    try{
+      const data=await dbF("inventory_items?select=id,equipment_type,manufacturer,model_number,serial_number,amperage_rating,voltage_rating,grade,date_received,customer_origin,source_job_site,scanned_by&physical_state=eq.on_dock&order=date_received.asc.nullsfirst&limit=200");
+      setPutawayQueue(data||[]);
+    }catch(e){setMsg({t:"error",m:"Could not load putaway queue: "+e.message});}
+    setPutawayLoading(false);
+  },[]);
+  const loadItemPhoto=async(itemId)=>{
+    try{
+      const photos=await dbF(`item_photos?select=photo_url,photo_role&reference_id=eq.${encodeURIComponent(itemId)}&reference_type=eq.inventory_item&order=created_at.asc&limit=4`);
+      return photos||[];
+    }catch{return [];}
+  };
+  const openPutawayItem=async(item)=>{
+    setPutawayItem({...item,_photos:[]});
+    setPutawayLoc("");
+    const photos=await loadItemPhoto(item.id);
+    setPutawayItem(prev=>prev&&prev.id===item.id?{...prev,_photos:photos}:prev);
+  };
+  const doPutaway=async()=>{
+    if(!putawayItem)return;
+    const code=putawayLoc.trim().toUpperCase();
+    if(!code){setMsg({t:"error",m:"Location code required"});return;}
+    setPutawayBusy(true);
+    try{
+      await dbF(`inventory_items?id=eq.${encodeURIComponent(putawayItem.id)}`,{
+        method:"PATCH",
+        headers:{Prefer:"return=minimal"},
+        body:JSON.stringify({physical_state:"on_shelf",location_detail:code}),
+      });
+      setPutawayLastDone({id:putawayItem.id,code});
+      setMsg({t:"success",m:`Put away ${putawayItem.equipment_type||"item"} to ${code}.`});
+      setPutawayQueue(q=>q.filter(x=>x.id!==putawayItem.id));
+      setPutawayItem(null);setPutawayLoc("");
+    }catch(e){setMsg({t:"error",m:"Putaway failed: "+e.message});}
+    setPutawayBusy(false);
+  };
+  const undoLastPutaway=async()=>{
+    if(!putawayLastDone)return;
+    setPutawayBusy(true);
+    try{
+      await dbF(`inventory_items?id=eq.${encodeURIComponent(putawayLastDone.id)}`,{
+        method:"PATCH",
+        headers:{Prefer:"return=minimal"},
+        body:JSON.stringify({physical_state:"on_dock",location_detail:null}),
+      });
+      setMsg({t:"success",m:"Undone. Item back on dock."});
+      setPutawayLastDone(null);
+      loadPutawayQueue();
+    }catch(e){setMsg({t:"error",m:"Undo failed: "+e.message});}
+    setPutawayBusy(false);
+  };
+
   const [job,setJob]=useState({jobName:"",customerName:"",siteAddress:"",preparedBy:"",bidDate:today(),laborHours:"",laborRate:"75",transportCost:"",targetMargin:"45",notes:""});
   const [items,setItems]=useState([]);
   const [errs,setErrs]=useState({});
@@ -307,6 +371,7 @@ export default function Walkthrough() {
     setJobs(await sG("wes_wt")||[]);setLd(false);
   },[]);
   useEffect(()=>{loadJobs();},[loadJobs]);
+  useEffect(()=>{if(mode==="putaway"&&view==="new")loadPutawayQueue();},[mode,view,loadPutawayQueue]);
 
   const uf=(k,v)=>{setJob(p=>({...p,[k]:v}));if(errs[k])setErrs(p=>({...p,[k]:undefined}));};
 
@@ -481,7 +546,7 @@ export default function Walkthrough() {
         location_detail:mode==="quick"?qcLocationCode.trim():null,
         customer_origin:mode==="receive"?(job.customerName||null):null,
         source_job_site:mode==="receive"?(job.jobName||null):null,
-        status:"received",
+        status:"received",physical_state:mode==="receive"?"on_dock":"on_shelf",
         date_received:mode==="receive"?(job.bidDate||today()):today(),
         scanned_by:mode==="receive"?(job.preparedBy||"receive"):"quick_capture",
         kva_rating:qcItem.kvaRating||null,phase:qcItem.phase||"3",
@@ -632,7 +697,7 @@ export default function Walkthrough() {
         location_detail:mode==="quick"?qcLocationCode.trim():null,
         customer_origin:mode==="receive"?(job.customerName||null):null,
         source_job_site:mode==="receive"?(job.jobName||null):null,
-        status:"received",physical_state:"on_shelf",parent_id:null,
+        status:"received",physical_state:mode==="receive"?"on_dock":"on_shelf",parent_id:null,
         date_received:mode==="receive"?(job.bidDate||today()):today(),
         scanned_by:issuedByLabel,
         kva_rating:qcItem.kvaRating||null,phase:qcItem.phase||"3",
@@ -738,7 +803,7 @@ export default function Walkthrough() {
           location_detail:mode==="quick"?qcLocationCode.trim():null,
           customer_origin:mode==="receive"?(job.customerName||null):null,
           source_job_site:mode==="receive"?(job.jobName||null):null,
-          status:"received",physical_state:"on_shelf",parent_id:null,
+          status:"received",physical_state:mode==="receive"?"on_dock":"on_shelf",parent_id:null,
           date_received:dateRecv,scanned_by:issuedByLabel,
           condition_notes:note,
           received_verified:true,verified_by:issuedByLabel,verified_date:dateRecv,
@@ -866,6 +931,139 @@ ${header}
     const w=window.open("","_blank","width=900,height=1200");
     if(!w){setMsg({t:"error",m:"Popup blocked. Allow popups for this site."});return;}
     w.document.open();w.document.write(html);w.document.close();
+  };
+
+  /* === WALKTHROUGH BULK PHOTO INTAKE ===
+     Tech dumps multiple photos on a job walk. AI identifies distinct units across all photos
+     and groups breakers under their parent switchgear/panel. Each detected unit becomes a
+     bid line item via addItem(), pre-filled with AI fields, with the source photo attached.
+     No DB writes; everything lives in items[] until the walkthrough is saved.
+  */
+  const [bulkBusy,setBulkBusy]=useState(null); // {step,progress,total} or null
+  const handleWalkthroughBulkIntake=async(fileList)=>{
+    const files=Array.from(fileList||[]).filter(f=>f.type.startsWith("image/"));
+    if(files.length===0)return;
+    setBulkBusy({step:"upload",progress:0,total:files.length});
+    setMsg(null);
+    try{
+      // 1. Compress + upload each photo in parallel; keep base64 for AI call
+      const uploaded=[];
+      let done=0;
+      await Promise.all(files.map(async(file)=>{
+        try{
+          const compressed=await compressImage(file,2576,0.9);
+          const b64=compressed.split(",")[1];
+          let photoUrl=null;
+          try{
+            const blob=await(await fetch(compressed)).blob();
+            const fname=`${Date.now()}_${Math.random().toString(36).slice(2,8)}.jpg`;
+            const upResp=await fetch(`${SB}/storage/v1/object/item-photos/${fname}`,{method:"POST",headers:{apikey:SK,Authorization:`Bearer ${SK}`,"Content-Type":"image/jpeg"},body:blob});
+            if(upResp.ok)photoUrl=`${SB}/storage/v1/object/public/item-photos/${fname}`;
+          }catch{}
+          uploaded.push({b64,photoUrl});
+        }catch{}
+        done++;
+        setBulkBusy({step:"upload",progress:done,total:files.length});
+      }));
+      if(uploaded.length===0)throw new Error("No photos uploaded");
+
+      // 2. Send all images to scan-breaker-lineup in one call
+      setBulkBusy({step:"analyze",progress:0,total:uploaded.length});
+      const images=uploaded.map(p=>({base64:p.b64,media_type:"image/jpeg"}));
+      const resp=await fetch(`${SB}/functions/v1/scan-breaker-lineup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({images})});
+      if(!resp.ok){const t=await resp.text();throw new Error(`AI ${resp.status}: ${t.slice(0,120)}`);}
+      const p=await resp.json();
+      if(p.error)throw new Error(p.error);
+
+      // 3. Group AI components: switchgear/panel parents host breakers as sub-array
+      const all=p.components||[];
+      if(all.length===0){setMsg({t:"error",m:"No equipment detected in photos"});setBulkBusy(null);return;}
+      const isBreaker=(c)=>{const t=(c.equipment_type||"").toLowerCase();return t.includes("breaker");};
+      const isParent=(c)=>{const t=(c.equipment_type||"").toLowerCase();return t.includes("switchgear")||t.includes("panel")||t.includes("switchboard")||t.includes("mcc")||t.includes("motor control");};
+      const parents=all.filter(c=>isParent(c));
+      const breakers=all.filter(c=>isBreaker(c));
+      const others=all.filter(c=>!isParent(c)&&!isBreaker(c));
+      // Resolve source photo for a component (source_image is 1-based, may be null)
+      const photoFor=(c)=>{
+        const n=parseInt(String(c.source_image==null?"":c.source_image).replace(/\D/g,""));
+        if(!n||n<1||n>uploaded.length)return null;
+        return uploaded[n-1].photoUrl;
+      };
+      // If there is no detected parent, treat breakers as standalone items
+      const hostParent=parents[0]||null;
+      const breakerSubArray=hostParent?breakers.map(b=>({
+        amp:String(b.amperage||"20").replace(/[^0-9]/g,"")||"20",
+        count:1,
+        poles:String(b.poles||"1").replace(/[^0-9]/g,"")||"1",
+        grade:b.grade||"B",
+        oem:"oem",
+        pitting:false,contactWear:false,
+        notes:[b.position?`Pos ${b.position}`:"",b.manufacturer||"",b.model_or_type||"",b.notes||""].filter(Boolean).join(" / "),
+      })):[];
+
+      // 4. Build new items list (one per detected unit), preserving existing items
+      const buildRow=(c,extraBreakers)=>{
+        const photoUrl=photoFor(c);
+        return {
+          equipmentType:c.equipment_type||"",
+          manufacturer:c.manufacturer||"",
+          modelNumber:c.model_or_type||"",
+          catalogNumber:c.model_or_type||"",
+          serialNumber:"",
+          voltageRating:c.voltage||"",
+          amperageRating:String(c.amperage||"").replace(/[^0-9]/g,""),
+          quantity:1,grade:c.grade||"C",
+          nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",
+          phase:"3",kvaRating:"",kvaForced:"",
+          windingMaterial:"",windingHv:"",windingLv:"",
+          interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
+          frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",
+          busRating:"",shortCircuitRating:"",bilKv:"",voltageClass:"",numSections:"",busMaterial:"",switchgearType:"",
+          disposition:"unassigned",estimatedResale:0,estimatedScrap:0,
+          ebayCompAvg:0,priceBookValue:0,estimatedWeight:0,
+          conditionNotes:[c.position?`Pos ${c.position}`:"",c.notes||""].filter(Boolean).join(". "),
+          photos:photoUrl?[photoUrl]:[],
+          missing:[],breakers:extraBreakers||[],
+          acquisitionCost:"",refurbCost:"",askingPrice:"",
+          barcodeSku:"",putawayLocation:"",putawayQty:1,skidId:"",
+          pickupStatus:"pending",destination:"main_warehouse",
+        };
+      };
+      const newRows=[];
+      if(hostParent){
+        // First detected parent gets all breakers as its sub-array
+        newRows.push(buildRow(hostParent,breakerSubArray));
+        // Any other detected parents become their own rows with no breakers attached
+        for(let i=1;i<parents.length;i++)newRows.push(buildRow(parents[i],[]));
+      }else{
+        // No parent detected: every breaker becomes its own standalone row
+        for(const b of breakers)newRows.push(buildRow(b,[]));
+      }
+      for(const o of others)newRows.push(buildRow(o,[]));
+
+      // 5. Apply auto-derivations (price book, scrap, weight) mirroring uItem's logic
+      const enriched=newRows.map(r=>{
+        const pb=lookupPrice(r.equipmentType,r.grade,r.amperageRating);
+        const u={...r};
+        if(pb){
+          u.priceBookValue=parseFloat(pb.avg_sold_price)||0;
+          if(u.disposition!=="scrap")u.estimatedResale=parseFloat(pb.avg_sold_price)||0;
+        }
+        u.estimatedScrap=calcScrap(r.equipmentType,r.amperageRating);
+        const wt=weights.find(w=>w.equipment_type===r.equipmentType);
+        if(wt)u.estimatedWeight=parseFloat(wt.estimated_weight_lbs)||0;
+        return u;
+      });
+      setItems(prev=>[...prev,...enriched]);
+      const summary=hostParent
+        ?`${enriched.length} item${enriched.length===1?"":"s"} added (${breakerSubArray.length} breakers nested in ${hostParent.equipment_type||"parent"})`
+        :`${enriched.length} item${enriched.length===1?"":"s"} added`;
+      setMsg({t:"success",m:summary});
+    }catch(e){
+      setMsg({t:"error",m:"Bulk intake failed: "+e.message});
+    }finally{
+      setBulkBusy(null);
+    }
   };
 
   const addItem=()=>setItems(p=>[...p,{
@@ -1317,14 +1515,14 @@ ${header}
       </div>
 
       {view==="new"&&<div style={{display:"flex",gap:4,marginBottom:12}}>
-        {[{m:"walkthrough",i:"[W]",l:"Walkthrough",s:"On-site bid"},{m:"pickup",i:"[P]",l:"Pickup",s:"Job-site load"},{m:"receive",i:"[R]",l:"Receive",s:"Dock arrival"},{m:"quick",i:"[Q]",l:"Quick",s:"Yard sticker walk"}].map(({m,i,l,s})=><button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"10px 4px",borderRadius:10,border:`2.5px solid ${mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":"#3d5e3f"):"#e2e8f0"}`,background:mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":"#3d5e3f"):"#fff",color:mode===m?"#fff":"#64748b",fontWeight:800,fontSize:12,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-          <div>{i} {l}</div><div style={{fontSize:9,fontWeight:600,opacity:mode===m?0.9:0.7}}>{s}</div>
+        {[{m:"walkthrough",i:"[W]",l:"Walkthrough",s:""},{m:"receive",i:"[R]",l:"Receive",s:"Dock arrival"},{m:"putaway",i:"[P]",l:"Putaway",s:"Dock to shelf"},{m:"quick",i:"[Q]",l:"Quick",s:"Location walk"}].map(({m,i,l,s})=><button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"10px 4px",borderRadius:10,border:`2.5px solid ${mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":m==="putaway"?"#a16207":"#3d5e3f"):"#e2e8f0"}`,background:mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":m==="putaway"?"#a16207":"#3d5e3f"):"#fff",color:mode===m?"#fff":"#64748b",fontWeight:800,fontSize:12,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <div>{i} {l}</div>{s&&<div style={{fontSize:9,fontWeight:600,opacity:mode===m?0.9:0.7}}>{s}</div>}
         </button>)}
       </div>}
 
       {msg&&<div style={{padding:"12px",background:msg.t==="error"?"#fef2f2":msg.t==="info"?"#eff6ff":"#ecfdf5",border:`1px solid ${msg.t==="error"?"#fecaca":msg.t==="info"?"#bfdbfe":"#a7f3d0"}`,borderRadius:10,color:msg.t==="error"?"#dc2626":msg.t==="info"?"#1d4ed8":"#065f46",fontSize:13,marginBottom:12,display:"flex",justifyContent:"space-between"}}><span>{msg.m}</span><button onClick={()=>setMsg(null)} style={{background:"none",border:"none",fontWeight:700,cursor:"pointer",color:"inherit"}}>&times;</button></div>}
 
-      {view==="new"&&(mode==="walkthrough"||mode==="pickup")&&<div>
+      {view==="new"&&mode==="walkthrough"&&<div>
         {mode!=="receive"&&<div style={card}>
           <div style={{fontSize:15,fontWeight:800,marginBottom:12}}>Job Info</div>
           <div style={{marginBottom:10}}><label style={lbl}>Job / Site Name *</label><input style={errs.jobName?inpE:inp} value={job.jobName} onChange={e=>uf("jobName",e.target.value)} placeholder="Data Center XYZ"/>{errs.jobName&&<div style={{fontSize:12,color:"#ef4444",marginTop:3}}>{errs.jobName}</div>}</div>
@@ -1355,6 +1553,13 @@ ${header}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
           <span style={{fontSize:15,fontWeight:800}}>Equipment ({items.length})</span>
           <button onClick={addItem} style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>+ Add Item</button>
+          <label style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#7c3aed",color:"#fff",fontWeight:700,fontSize:14,cursor:bulkBusy?"wait":"pointer",opacity:bulkBusy?0.6:1,marginLeft:8,display:"inline-block"}}>
+            <input type="file" accept="image/*" multiple disabled={!!bulkBusy} style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";handleWalkthroughBulkIntake(fs);}}/>
+            + Bulk Photo Intake
+          </label>
+          {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
+            {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?"AI analyzing photos...":"Processing..."}
+          </div>}
         </div>
         {errs.items&&<div style={{fontSize:12,color:"#ef4444",marginBottom:8}}>{errs.items}</div>}
 
@@ -1560,6 +1765,66 @@ ${header}
         <div style={card}><label style={lbl}>Notes</label><textarea style={{...inp,minHeight:60,resize:"vertical"}} value={job.notes} onChange={e=>uf("notes",e.target.value)} placeholder="Scope, exclusions, access notes..."/></div>
       </div>}
 
+      {view==="new"&&mode==="putaway"&&<div>
+        <div style={{...card,background:"linear-gradient(135deg,#a16207,#854d0e)",color:"#fff"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:11,opacity:0.85,fontWeight:700,letterSpacing:1}}>PUTAWAY . DOCK TO SHELF</div>
+              <div style={{fontSize:20,fontWeight:800,marginTop:4}}>{putawayQueue.length} item{putawayQueue.length===1?"":"s"} on dock</div>
+            </div>
+            <button onClick={loadPutawayQueue} disabled={putawayLoading} style={{padding:"8px 14px",borderRadius:8,border:"1px solid rgba(255,255,255,0.4)",background:"transparent",color:"#fff",fontSize:12,fontWeight:700,cursor:putawayLoading?"wait":"pointer"}}>{putawayLoading?"Loading...":"Refresh"}</button>
+          </div>
+        </div>
+
+        {putawayLastDone&&<div style={{padding:"10px 14px",borderRadius:10,background:"#fef3c7",border:"1px solid #fcd34d",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#78350f",fontWeight:600}}>Last item put to {putawayLastDone.code}</span>
+          <button onClick={undoLastPutaway} disabled={putawayBusy} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #92400e",background:"#fff",color:"#92400e",fontSize:11,fontWeight:700,cursor:putawayBusy?"wait":"pointer"}}>Undo</button>
+        </div>}
+
+        {!putawayItem&&<>
+          {putawayQueue.length===0&&!putawayLoading&&<div style={{...card,textAlign:"center",padding:"32px 16px",color:"#64748b"}}>
+            <div style={{fontSize:14,fontWeight:700,marginBottom:6}}>No items waiting for putaway</div>
+            <div style={{fontSize:12}}>Items received at the dock will appear here.</div>
+          </div>}
+          {putawayQueue.map((it,idx)=><div key={it.id} onClick={()=>openPutawayItem(it)} style={{...card,cursor:"pointer",padding:14,marginBottom:8,borderLeft:"4px solid #a16207"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>{it.equipment_type||"(no type)"}</div>
+                <div style={{fontSize:12,color:"#475569",marginBottom:2}}>{[it.manufacturer,it.model_number].filter(Boolean).join(" / ")||"-"}</div>
+                <div style={{fontSize:11,color:"#64748b"}}>S/N: {it.serial_number||"UNKNOWN"} . {[it.amperage_rating&&`${it.amperage_rating}A`,it.voltage_rating,it.grade&&`Gr ${it.grade}`].filter(Boolean).join(" . ")}</div>
+                {(it.customer_origin||it.source_job_site)&&<div style={{fontSize:10,color:"#94a3b8",marginTop:3}}>From: {[it.customer_origin,it.source_job_site].filter(Boolean).join(" / ")}</div>}
+              </div>
+              <div style={{fontSize:10,color:"#94a3b8",whiteSpace:"nowrap"}}>{it.date_received||"-"}</div>
+            </div>
+          </div>)}
+        </>}
+
+        {putawayItem&&<div style={card}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:15,fontWeight:800}}>Put Away Item</div>
+            <button onClick={()=>{setPutawayItem(null);setPutawayLoc("");}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"#fff",color:"#64748b",fontSize:11,fontWeight:700,cursor:"pointer"}}>Back to queue</button>
+          </div>
+          {(putawayItem._photos||[]).length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+            {putawayItem._photos.map((p,i)=><img key={i} src={p.photo_url} alt={p.photo_role||""} style={{width:84,height:84,objectFit:"cover",borderRadius:8,border:"1px solid #e2e8f0"}}/>)}
+          </div>}
+          <div style={{padding:12,background:"#f8fafc",borderRadius:8,border:"1px solid #e2e8f0",marginBottom:14}}>
+            <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>{putawayItem.equipment_type||"(no type)"}</div>
+            <div style={{fontSize:12,color:"#475569",marginBottom:2}}>{[putawayItem.manufacturer,putawayItem.model_number].filter(Boolean).join(" / ")||"-"}</div>
+            <div style={{fontSize:11,color:"#64748b"}}>S/N: {putawayItem.serial_number||"UNKNOWN"}</div>
+            <div style={{fontSize:11,color:"#64748b"}}>{[putawayItem.amperage_rating&&`${putawayItem.amperage_rating}A`,putawayItem.voltage_rating,putawayItem.grade&&`Grade ${putawayItem.grade}`].filter(Boolean).join(" . ")}</div>
+          </div>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#475569",marginBottom:6,letterSpacing:0.5}}>SHELF / RACK LOCATION CODE *</label>
+          <input
+            autoFocus
+            value={putawayLoc}
+            onChange={e=>setPutawayLoc(e.target.value.toUpperCase())}
+            onKeyDown={e=>{if(e.key==="Enter"&&!putawayBusy&&putawayLoc.trim())doPutaway();}}
+            placeholder="e.g. A-12-3"
+            style={{boxSizing:"border-box",width:"100%",padding:"14px 16px",fontSize:18,fontWeight:700,letterSpacing:1,borderRadius:10,border:"2px solid #a16207",background:"#fff",marginBottom:14,textTransform:"uppercase"}}/>
+          <button onClick={doPutaway} disabled={putawayBusy||!putawayLoc.trim()} style={{width:"100%",padding:18,borderRadius:12,border:"none",background:putawayBusy||!putawayLoc.trim()?"#94a3b8":"linear-gradient(135deg,#a16207,#854d0e)",color:"#fff",fontSize:16,fontWeight:800,cursor:putawayBusy||!putawayLoc.trim()?"not-allowed":"pointer"}}>{putawayBusy?"Saving...":`Put Away to ${putawayLoc||"..."}`}</button>
+        </div>}
+      </div>}
+
       {view==="new"&&(mode==="quick"||mode==="receive")&&<div>
         {qcPhase!=="location"&&<div style={{position:"sticky",top:0,zIndex:10,background:mode==="receive"?"#16a34a":"#0891b2",color:"#fff",padding:"10px 14px",borderRadius:10,marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div style={{fontSize:13,fontWeight:700}}>
@@ -1605,11 +1870,6 @@ ${header}
                 <input ref={qcFileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)handleQuickScan(f);}}/>
                 CAPTURE ITEM
               </label>
-              <label style={{display:"block",boxSizing:"border-box",width:"100%",marginTop:10,padding:"14px 16px",borderRadius:14,background:"#fff",border:"2px dashed #7c3aed",color:"#7c3aed",fontSize:13,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
-                <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";if(fs&&fs.length>0){setBulkIntake(true);setEnumComponents([]);setEnumParentObs(null);setEnumPhotos([]);setQcPhase("enumerate_capture");handleEnumerateBatchCapture(fs);}}}/>
-                [GAL] BULK INTAKE FROM GALLERY / DOWNLOADS
-              </label>
-              <div style={{fontSize:11,color:"#94a3b8",marginTop:6}}>Dump multiple photos. AI builds a component list. Each row saves as its own received item.</div>
             </div>
           </div>
           {qcSession.length>0&&<button onClick={printSessionSummary} style={{width:"100%",boxSizing:"border-box",padding:14,borderRadius:10,border:`2px solid ${mode==="receive"?"#16a34a":"#0891b2"}`,background:"#fff",color:mode==="receive"?"#16a34a":"#0891b2",fontSize:14,fontWeight:700,cursor:"pointer",marginBottom:8}}>Print Session Summary ({qcSession.length} item{qcSession.length===1?"":"s"})</button>}
