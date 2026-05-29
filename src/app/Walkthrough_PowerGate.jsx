@@ -941,43 +941,57 @@ ${header}
   */
   const [bulkBusy,setBulkBusy]=useState(null); // {step,progress,total} or null
   const handleWalkthroughBulkIntake=async(fileList)=>{
-    const files=Array.from(fileList||[]).filter(f=>f.type.startsWith("image/"));
-    if(files.length===0)return;
+    // Windows desktop often reports empty f.type for images. Accept by extension too.
+    const isImage=(f)=>{
+      if(!f)return false;
+      if(f.type&&f.type.startsWith("image/"))return true;
+      const n=(f.name||"").toLowerCase();
+      return /\.(jpe?g|png|webp|heic|heif|bmp|gif)$/.test(n);
+    };
+    const files=Array.from(fileList||[]).filter(isImage);
+    if(files.length===0){
+      const total=fileList?fileList.length:0;
+      setMsg({t:"error",m:total>0?`Selected ${total} file(s) but none were images. Pick JPG/PNG/WEBP.`:"No files selected."});
+      return;
+    }
     setBulkBusy({step:"upload",progress:0,total:files.length});
     setMsg(null);
     try{
-      // 1. Compress + upload each photo in parallel; keep base64 for AI call
+      // 1. Compress + upload sequentially. Surface errors per file.
       const uploaded=[];
-      let done=0;
-      await Promise.all(files.map(async(file)=>{
+      const errors=[];
+      for(let i=0;i<files.length;i++){
+        const file=files[i];
+        setBulkBusy({step:"upload",progress:i,total:files.length});
         try{
           const compressed=await compressImage(file,2576,0.9);
+          if(!compressed||!compressed.startsWith("data:"))throw new Error("compression returned no data");
           const b64=compressed.split(",")[1];
           let photoUrl=null;
           try{
             const blob=await(await fetch(compressed)).blob();
-            const fname=`${Date.now()}_${Math.random().toString(36).slice(2,8)}.jpg`;
+            const fname=`${Date.now()}_${i}_${Math.random().toString(36).slice(2,8)}.jpg`;
             const upResp=await fetch(`${SB}/storage/v1/object/item-photos/${fname}`,{method:"POST",headers:{apikey:SK,Authorization:`Bearer ${SK}`,"Content-Type":"image/jpeg"},body:blob});
             if(upResp.ok)photoUrl=`${SB}/storage/v1/object/public/item-photos/${fname}`;
-          }catch{}
+            else errors.push(`${file.name}: upload HTTP ${upResp.status}`);
+          }catch(upErr){errors.push(`${file.name}: upload ${upErr.message}`);}
           uploaded.push({b64,photoUrl});
-        }catch{}
-        done++;
-        setBulkBusy({step:"upload",progress:done,total:files.length});
-      }));
-      if(uploaded.length===0)throw new Error("No photos uploaded");
+        }catch(cErr){errors.push(`${file.name}: ${cErr.message}`);}
+      }
+      setBulkBusy({step:"upload",progress:files.length,total:files.length});
+      if(uploaded.length===0)throw new Error(`All ${files.length} photo(s) failed. ${errors.slice(0,2).join(" / ")}`);
 
       // 2. Send all images to scan-breaker-lineup in one call
       setBulkBusy({step:"analyze",progress:0,total:uploaded.length});
       const images=uploaded.map(p=>({base64:p.b64,media_type:"image/jpeg"}));
       const resp=await fetch(`${SB}/functions/v1/scan-breaker-lineup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({images})});
-      if(!resp.ok){const t=await resp.text();throw new Error(`AI ${resp.status}: ${t.slice(0,120)}`);}
+      if(!resp.ok){const t=await resp.text();throw new Error(`AI ${resp.status}: ${t.slice(0,160)}`);}
       const p=await resp.json();
       if(p.error)throw new Error(p.error);
 
       // 3. Group AI components: switchgear/panel parents host breakers as sub-array
       const all=p.components||[];
-      if(all.length===0){setMsg({t:"error",m:"No equipment detected in photos"});setBulkBusy(null);return;}
+      if(all.length===0){setMsg({t:"error",m:"AI returned no equipment. Try clearer photos or use + Add Item."});setBulkBusy(null);return;}
       const isBreaker=(c)=>{const t=(c.equipment_type||"").toLowerCase();return t.includes("breaker");};
       const isParent=(c)=>{const t=(c.equipment_type||"").toLowerCase();return t.includes("switchgear")||t.includes("panel")||t.includes("switchboard")||t.includes("mcc")||t.includes("motor control");};
       const parents=all.filter(c=>isParent(c));
@@ -1554,7 +1568,7 @@ ${header}
           <span style={{fontSize:15,fontWeight:800}}>Equipment ({items.length})</span>
           <button onClick={addItem} style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>+ Add Item</button>
           <label style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#7c3aed",color:"#fff",fontWeight:700,fontSize:14,cursor:bulkBusy?"wait":"pointer",opacity:bulkBusy?0.6:1,marginLeft:8,display:"inline-block"}}>
-            <input type="file" accept="image/*" multiple disabled={!!bulkBusy} style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";handleWalkthroughBulkIntake(fs);}}/>
+            <input type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.bmp" multiple disabled={!!bulkBusy} style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";handleWalkthroughBulkIntake(fs);}}/>
             + Bulk Photo Intake
           </label>
           {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
