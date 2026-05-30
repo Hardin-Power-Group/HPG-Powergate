@@ -208,6 +208,16 @@ function inferMfrFromCatalog(cat){
   for(const [pre,mfr] of CATALOG_MFR){if(c.startsWith(pre)&&pre.length>bestPre.length){bestPre=pre;bestMfr=mfr;}}
   return bestMfr;
 }
+/* Derive the facility a location code belongs to (3030 racks use the MWH- prefix). */
+function facilityOf(code){
+  if(!code)return "";
+  const c=String(code).toUpperCase().trim();
+  if(c.startsWith("3030")||c.startsWith("MWH"))return "3030";
+  if(c.startsWith("3031"))return "3031";
+  if(c.startsWith("8600"))return "8600";
+  if(c.startsWith("SA"))return "SA";
+  return "";
+}
 const GRD=[{v:"A",c:"#16a34a",d:"Excellent"},{v:"B",c:"#2563eb",d:"Good"},{v:"C",c:"#f59e0b",d:"Fair"},{v:"D",c:"#dc2626",d:"Scrap"}];
 const gc={};GRD.forEach(g=>gc[g.v]=g.c);
 const DISP=[{v:"unassigned",l:"Unassigned",c:"#6b7280"},{v:"resale",l:"Resale",c:"#2563eb"},{v:"deman",l:"Deman",c:"#8b5cf6"},{v:"ebay",l:"eBay",c:"#16a34a"},{v:"skid",l:"Skid Build",c:"#0891b2"},{v:"scrap",l:"Scrap",c:"#dc2626"}];
@@ -412,6 +422,7 @@ export default function Walkthrough() {
   const [splitBusy,setSplitBusy]=useState(false);
   const [ohTab,setOhTab]=useState("items"); // items | onhand
   const [ohRows,setOhRows]=useState([]);
+  const [zoneLocs,setZoneLocs]=useState([]); // facility zone/workflow locations for the Inv filter
   const [ohLoading,setOhLoading]=useState(false);
   const [ohSearch,setOhSearch]=useState("");
 
@@ -544,6 +555,12 @@ export default function Walkthrough() {
     catch(e){setMsg({t:"error",m:"On-hand load failed: "+e.message});}
     setOhLoading(false);
   },[]);
+
+  /* Load facility zone/workflow locations once for the Inv location filter. */
+  const loadZoneLocs=useCallback(async()=>{
+    try{const rows=await dbF("locations?select=code,facility,display_name&kind=in.(zone,workflow)&is_active=eq.true&order=facility.asc,sort_order.asc");if(rows&&rows.length)setZoneLocs(rows);}catch{}
+  },[]);
+  useEffect(()=>{if(view==="inventory"&&zoneLocs.length===0)loadZoneLocs();},[view,zoneLocs.length,loadZoneLocs]);
 
   /* === PUTAWAY MODE ===
      Lists items currently at the dock (physical_state='on_dock').
@@ -2785,7 +2802,7 @@ ${header}
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
             <select style={{...inpSm,flex:1}} value={invFilterType} onChange={e=>setInvFilterType(e.target.value)}><option value="">All types</option>{EQ.map(t=><option key={t}>{t}</option>)}</select>
             <select style={{...inpSm,flex:1}} value={invFilterGrade} onChange={e=>setInvFilterGrade(e.target.value)}><option value="">All grades</option>{GRD.map(g=><option key={g.v} value={g.v}>{g.v}</option>)}</select>
-            <select style={{...inpSm,flex:1}} value={invFilterLoc} onChange={e=>setInvFilterLoc(e.target.value)}><option value="">All locations</option>{LOC.map(l=><option key={l.v} value={l.v}>{l.l}</option>)}</select>
+            <select style={{...inpSm,flex:1}} value={invFilterLoc} onChange={e=>setInvFilterLoc(e.target.value)}><option value="">All locations</option>{FACILITIES.map(f=>(<optgroup key={f} label={f}><option value={`FAC:${f}`}>All of {f}</option>{zoneLocs.filter(z=>z.facility===f).map(z=><option key={z.code} value={z.code}>{z.code}</option>)}</optgroup>))}</select>
           </div>
         </div>
         {invSel.size>0&&<div style={{...card,borderLeft:`4px solid ${MODE_COLOR.pick}`}}>
@@ -2804,7 +2821,10 @@ ${header}
           if(invSearch){const q=invSearch.toLowerCase();filtered=filtered.filter(r=>[r.serial_number,r.model_number,r.catalog_number,r.manufacturer,r.equipment_type,r.location_detail,r.putaway_location,r.barcode_sku,r.id].some(v=>v&&String(v).toLowerCase().includes(q)));}
           if(invFilterType)filtered=filtered.filter(r=>r.equipment_type===invFilterType);
           if(invFilterGrade)filtered=filtered.filter(r=>r.grade===invFilterGrade);
-          if(invFilterLoc)filtered=filtered.filter(r=>r.location===invFilterLoc);
+          if(invFilterLoc){
+            if(invFilterLoc.startsWith("FAC:")){const f=invFilterLoc.slice(4);filtered=filtered.filter(r=>facilityOf(r.location_detail||r.location)===f);}
+            else filtered=filtered.filter(r=>(r.location_detail||"")===invFilterLoc);
+          }
           if(filtered.length===0)return <div style={{...card,textAlign:"center",color:"#94a3b8",padding:40}}>No matches.</div>;
           return filtered.map(r=>(
             <div key={r.id} style={{...card,borderLeft:`4px solid ${gc[r.grade]||"#6b7280"}`,padding:12,...(invSel.has(r.id)?{outline:`2px solid ${MODE_COLOR.pick}`}:{})}}>
