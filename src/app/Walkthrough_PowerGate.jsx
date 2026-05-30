@@ -940,6 +940,7 @@ ${header}
      No DB writes; everything lives in items[] until the walkthrough is saved.
   */
   const [bulkBusy,setBulkBusy]=useState(null); // {step,progress,total} or null
+  const [bulkDragOver,setBulkDragOver]=useState(false);
   const handleWalkthroughBulkIntake=async(fileList)=>{
     // Diagnostic: log what the picker actually returned
     const rawCount=fileList?fileList.length:0;
@@ -1582,6 +1583,42 @@ ${header}
           {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
             {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?"AI analyzing photos...":"Processing..."}
           </div>}
+        </div>
+        <div
+          onDragEnter={e=>{e.preventDefault();e.stopPropagation();if(!bulkBusy)setBulkDragOver(true);}}
+          onDragOver={e=>{e.preventDefault();e.stopPropagation();if(!bulkBusy)setBulkDragOver(true);}}
+          onDragLeave={e=>{e.preventDefault();e.stopPropagation();setBulkDragOver(false);}}
+          onDrop={e=>{
+            e.preventDefault();e.stopPropagation();setBulkDragOver(false);
+            if(bulkBusy)return;
+            const dt=e.dataTransfer;
+            if(!dt)return;
+            // Prefer items API (gives access to entries when dropping folders); fall back to files
+            let files=[];
+            if(dt.files&&dt.files.length>0){files=Array.from(dt.files);}
+            else if(dt.items&&dt.items.length>0){
+              for(const it of dt.items){if(it.kind==="file"){const f=it.getAsFile();if(f)files.push(f);}}
+            }
+            if(files.length>0)handleWalkthroughBulkIntake(files);
+            else setMsg({t:"error",m:"Drop returned no files. Try drag from File Explorer directly."});
+          }}
+          style={{
+            marginBottom:12,padding:"24px 16px",borderRadius:12,
+            border:`3px dashed ${bulkDragOver?"#7c3aed":bulkBusy?"#cbd5e1":"#a78bfa"}`,
+            background:bulkDragOver?"#ede9fe":bulkBusy?"#f1f5f9":"#faf5ff",
+            color:bulkDragOver?"#5b21b6":"#7c3aed",
+            textAlign:"center",fontSize:13,fontWeight:700,
+            transition:"all 0.15s",cursor:bulkBusy?"wait":"default",
+            pointerEvents:bulkBusy?"none":"auto",
+          }}
+        >
+          <div style={{fontSize:22,marginBottom:6}}>{bulkDragOver?"+":"[GAL]"}</div>
+          <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>
+            {bulkDragOver?"Release to upload":"Drag photos here from File Explorer"}
+          </div>
+          <div style={{fontSize:11,fontWeight:600,opacity:0.75}}>
+            {bulkBusy?"Processing...":"or use the + Bulk Photo Intake button above. Multiple photos OK."}
+          </div>
         </div>
         {errs.items&&<div style={{fontSize:12,color:"#ef4444",marginBottom:8}}>{errs.items}</div>}
 
