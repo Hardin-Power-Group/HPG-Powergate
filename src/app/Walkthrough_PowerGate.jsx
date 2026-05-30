@@ -990,13 +990,37 @@ ${header}
       setBulkBusy({step:"upload",progress:files.length,total:files.length});
       if(uploaded.length===0)throw new Error(`All ${files.length} photo(s) failed. ${errors.slice(0,2).join(" / ")}`);
 
-      // 2. Send all images to scan-breaker-lineup in one call
-      setBulkBusy({step:"analyze",progress:0,total:uploaded.length});
-      const images=uploaded.map(p=>({base64:p.b64,media_type:"image/jpeg"}));
-      const resp=await fetch(`${SB}/functions/v1/scan-breaker-lineup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({images})});
-      if(!resp.ok){const t=await resp.text();throw new Error(`AI ${resp.status}: ${t.slice(0,160)}`);}
-      const p=await resp.json();
-      if(p.error)throw new Error(p.error);
+      // 2. Send images to scan-breaker-lineup in chunks of 8 (edge function max), merge responses
+      const CHUNK=8;
+      const chunks=[];
+      for(let i=0;i<uploaded.length;i+=CHUNK)chunks.push(uploaded.slice(i,i+CHUNK));
+      setBulkBusy({step:"analyze",progress:0,total:chunks.length});
+      const mergedComponents=[];
+      const aiErrors=[];
+      for(let ci=0;ci<chunks.length;ci++){
+        setBulkBusy({step:"analyze",progress:ci,total:chunks.length});
+        const chunk=chunks[ci];
+        const baseOffset=ci*CHUNK; // for remapping source_image to the global index
+        try{
+          const images=chunk.map(p=>({base64:p.b64,media_type:"image/jpeg"}));
+          const resp=await fetch(`${SB}/functions/v1/scan-breaker-lineup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({images})});
+          if(!resp.ok){const t=await resp.text();aiErrors.push(`batch ${ci+1}: HTTP ${resp.status} ${t.slice(0,80)}`);continue;}
+          const pj=await resp.json();
+          if(pj.error){aiErrors.push(`batch ${ci+1}: ${pj.error}`);continue;}
+          const comps=Array.isArray(pj.components)?pj.components:[];
+          for(const c of comps){
+            // remap chunk-local source_image (1..8) to global photo index (1..uploaded.length)
+            const localIdx=parseInt(String(c.source_image==null?"":c.source_image).replace(/\D/g,""));
+            if(localIdx>=1&&localIdx<=chunk.length){c.source_image=baseOffset+localIdx;}
+            mergedComponents.push(c);
+          }
+        }catch(e){aiErrors.push(`batch ${ci+1}: ${e.message}`);}
+      }
+      setBulkBusy({step:"analyze",progress:chunks.length,total:chunks.length});
+      if(mergedComponents.length===0){
+        throw new Error(`All ${chunks.length} AI batch(es) failed. ${aiErrors.slice(0,2).join(" / ")}`);
+      }
+      const p={components:mergedComponents};
 
       // 3. Group AI components: aggregate breakers by spec (amp + poles + manufacturer)
       // so a panel of 34 breakers collapses to ~6 rows with quantity.
@@ -1111,10 +1135,25 @@ ${header}
       });
       setItems(prev=>[...prev,...enriched]);
       const totalBreakers=breakers.length;
-      const summary=totalBreakers>0
+      const baseSummary=totalBreakers>0
         ?`${enriched.length} row${enriched.length===1?"":"s"} added (${totalBreakers} breakers grouped into ${groupedBreakerRows.length} type${groupedBreakerRows.length===1?"":"s"}${parents.length===0?", panel synthesized":""})`
         :`${enriched.length} item${enriched.length===1?"":"s"} added`;
-      setMsg({t:"success",m:summary});
+      // Surface partial failures, if any. Upload errors first, then AI batch errors.
+      const failParts=[];
+      if(errors.length>0){
+        const sample=errors.slice(0,3).join("; ");
+        failParts.push(`${errors.length} photo${errors.length===1?"":"s"} failed to upload (${sample}${errors.length>3?", ...":""})`);
+      }
+      if(aiErrors.length>0){
+        const sample=aiErrors.slice(0,2).join("; ");
+        failParts.push(`${aiErrors.length} AI batch${aiErrors.length===1?"":"es"} failed (${sample}${aiErrors.length>2?", ...":""})`);
+      }
+      if(failParts.length>0){
+        setMsg({t:"info",m:`${baseSummary}. WARNING: ${failParts.join(". ")}`});
+        try{console.warn("[bulk intake] partial failures",{uploadErrors:errors,aiErrors});}catch{}
+      }else{
+        setMsg({t:"success",m:baseSummary});
+      }
     }catch(e){
       setMsg({t:"error",m:"Bulk intake failed: "+e.message});
     }finally{
@@ -1614,7 +1653,7 @@ ${header}
             + Bulk Photo Intake
           </label>
           {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
-            {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?"AI analyzing photos...":"Processing..."}
+            {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?`AI batch ${bulkBusy.progress}/${bulkBusy.total}...`:"Processing..."}
           </div>}
         </div>
         <div
