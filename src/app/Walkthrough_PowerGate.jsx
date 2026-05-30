@@ -941,6 +941,14 @@ ${header}
   */
   const [bulkBusy,setBulkBusy]=useState(null); // {step,progress,total} or null
   const handleWalkthroughBulkIntake=async(fileList)=>{
+    // Diagnostic: log what the picker actually returned
+    const rawCount=fileList?fileList.length:0;
+    const rawList=fileList?Array.from(fileList).map(f=>({name:f.name,type:f.type||"(no type)",size:f.size})):[];
+    try{console.log("[bulk intake] picker returned",rawCount,"file(s):",rawList);}catch{}
+    if(rawCount===0){
+      setMsg({t:"error",m:"Picker returned 0 files. Did you click Open after selecting? (You may have clicked Cancel.)"});
+      return;
+    }
     // Windows desktop often reports empty f.type for images. Accept by extension too.
     const isImage=(f)=>{
       if(!f)return false;
@@ -948,10 +956,10 @@ ${header}
       const n=(f.name||"").toLowerCase();
       return /\.(jpe?g|png|webp|heic|heif|bmp|gif)$/.test(n);
     };
-    const files=Array.from(fileList||[]).filter(isImage);
+    const files=Array.from(fileList).filter(isImage);
     if(files.length===0){
-      const total=fileList?fileList.length:0;
-      setMsg({t:"error",m:total>0?`Selected ${total} file(s) but none were images. Pick JPG/PNG/WEBP.`:"No files selected."});
+      const sample=rawList.slice(0,3).map(f=>`${f.name} [${f.type}]`).join(", ");
+      setMsg({t:"error",m:`Got ${rawCount} file(s) but none looked like images. First: ${sample}`});
       return;
     }
     setBulkBusy({step:"upload",progress:0,total:files.length});
