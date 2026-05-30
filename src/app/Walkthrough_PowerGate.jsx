@@ -176,6 +176,38 @@ const EQ=["Switchgear","Panelboard","Transformer","Circuit Breaker","Motor Contr
 const BULK_TYPES=new Set(["Bin Breaker","Mounting Kit","Gasket","Bus Bar","Wire","Inner","Nuts and Bolts"]);
 const ENUM_PARENT_TYPES=new Set(["Motor Control Center (MCC)","Switchgear","Panelboard"]);
 const MFR=["Eaton / Cutler-Hammer","Siemens","Square D / Schneider","ABB","GE","Westinghouse","ITE","Federal Pacific","Allen-Bradley / Rockwell","Mitsubishi","Yaskawa","Danfoss","Liebert / Vertiv","APC / Schneider","ABL Sursum","Other"];
+/* Map a raw manufacturer string from AI to the closest MFR dropdown option, or "" if no match. */
+function matchMfr(raw){
+  if(!raw)return "";
+  const r=String(raw).toLowerCase().trim();
+  const hit=MFR.find(m=>{
+    const parts=m.toLowerCase().split(/[\/\s]+/);
+    return parts.some(part=>part.length>2&&r.includes(part))||r.includes(m.toLowerCase());
+  });
+  return hit||"";
+}
+/* Deterministic manufacturer inference from a catalog/model prefix, used ONLY as a fallback
+   when the nameplate logo was not read. Conservative, longest-prefix wins. Values are marked
+   inferred in the UI so they are never mistaken for a nameplate read. Extend as needed. */
+const CATALOG_MFR=[
+  ["QOB","Square D / Schneider"],["QOU","Square D / Schneider"],["QO","Square D / Schneider"],
+  ["FAL","Square D / Schneider"],["FHL","Square D / Schneider"],["FA","Square D / Schneider"],["FH","Square D / Schneider"],["FC","Square D / Schneider"],
+  ["KAL","Square D / Schneider"],["KHL","Square D / Schneider"],["KA","Square D / Schneider"],["KH","Square D / Schneider"],["KC","Square D / Schneider"],
+  ["LCL","Square D / Schneider"],["LHL","Square D / Schneider"],["LC","Square D / Schneider"],["LH","Square D / Schneider"],["LE","Square D / Schneider"],["LI","Square D / Schneider"],["LX","Square D / Schneider"],
+  ["MA","Square D / Schneider"],["MH","Square D / Schneider"],
+  ["PA","Square D / Schneider"],["PH","Square D / Schneider"],["PJ","Square D / Schneider"],["PK","Square D / Schneider"],["PL","Square D / Schneider"],
+  ["THQB","GE"],["THQL","GE"],["THQ","GE"],["TQD","GE"],["TED","GE"],["TEB","GE"],["TFK","GE"],["TJK","GE"],["TKM","GE"],["SELA","GE"],["SFLA","GE"],["SGLA","GE"],["SKLA","GE"],
+  ["BAB","Eaton / Cutler-Hammer"],["GHB","Eaton / Cutler-Hammer"],["HFD","Eaton / Cutler-Hammer"],["FDB","Eaton / Cutler-Hammer"],["JDB","Eaton / Cutler-Hammer"],["KDB","Eaton / Cutler-Hammer"],["LDB","Eaton / Cutler-Hammer"],["NDB","Eaton / Cutler-Hammer"],
+  ["BQD","Siemens"],["HED","Siemens"],["FXD","Siemens"],["JXD","Siemens"],["LXD","Siemens"],["NXD","Siemens"],["QPF","Siemens"],["QP","Siemens"],
+];
+function inferMfrFromCatalog(cat){
+  if(!cat)return "";
+  const c=String(cat).toUpperCase().replace(/[^A-Z0-9]/g,"");
+  if(!c)return "";
+  let bestPre="",bestMfr="";
+  for(const [pre,mfr] of CATALOG_MFR){if(c.startsWith(pre)&&pre.length>bestPre.length){bestPre=pre;bestMfr=mfr;}}
+  return bestMfr;
+}
 const GRD=[{v:"A",c:"#16a34a",d:"Excellent"},{v:"B",c:"#2563eb",d:"Good"},{v:"C",c:"#f59e0b",d:"Fair"},{v:"D",c:"#dc2626",d:"Scrap"}];
 const gc={};GRD.forEach(g=>gc[g.v]=g.c);
 const DISP=[{v:"unassigned",l:"Unassigned",c:"#6b7280"},{v:"resale",l:"Resale",c:"#2563eb"},{v:"deman",l:"Deman",c:"#8b5cf6"},{v:"ebay",l:"eBay",c:"#16a34a"},{v:"skid",l:"Skid Build",c:"#0891b2"},{v:"scrap",l:"Scrap",c:"#dc2626"}];
@@ -656,6 +688,9 @@ export default function Walkthrough() {
         const parts=m.toLowerCase().split(/[\/\s]+/);
         return parts.some(part=>part.length>2&&raw.includes(part))||raw.includes(m.toLowerCase());
       });
+      const catNum=p.catalog_number||p.model_number||"";
+      let mfrResolved=mfrMatch||"";let mfrInf=false;
+      if(!mfrResolved){const gm=inferMfrFromCatalog(catNum);if(gm){mfrResolved=gm;mfrInf=true;}}
       const isTransformer=p.equipment_type&&p.equipment_type.toLowerCase().includes("transformer");
       const kva=p.kva_rating||(isTransformer?p.amperage_rating:null);
       const amps=isTransformer?null:(p.amperage_rating||null);
@@ -674,7 +709,8 @@ export default function Walkthrough() {
         amperageRating:amps||it.amperageRating,
         kvaRating:kva||it.kvaRating,
         kvaForced:p.kva_forced||it.kvaForced,
-        manufacturer:mfrMatch||it.manufacturer,
+        manufacturer:mfrResolved||it.manufacturer,
+        mfrInferred:mfrResolved?mfrInf:(it.mfrInferred||false),
         equipmentType:EQ.find(t=>p.equipment_type&&t.toLowerCase().includes(p.equipment_type.toLowerCase()))||it.equipmentType,
         phase:p.phase?String(p.phase).replace(/[^0-9]/g,""):it.phase,
         yearMfg:p.year_manufactured||it.yearMfg,
@@ -689,6 +725,7 @@ export default function Walkthrough() {
         breakerType:p.breaker_type||it.breakerType,
         tripUnitType:p.trip_unit_type||it.tripUnitType,
         mountingType:p.mounting_type||it.mountingType,
+        nemaRating:p.nema_rating||it.nemaRating,
         catalogNumber:p.catalog_number||p.model_number||it.catalogNumber,
         interruptRating:p.interrupting_rating||it.interruptRating,
         busRating:p.bus_rating||it.busRating,
@@ -1342,20 +1379,24 @@ ${header}
       // 4. Build rows. Build a "synthetic" panel row if breakers were detected without a parent.
       const buildRow=(c,extraBreakers,overrideQty)=>{
         const photoUrl=photoFor(c);
+        const cat=c.model_or_type||"";
+        let mfr=matchMfr(c.manufacturer)||c.manufacturer||"";
+        let mfrInf=false;
+        if(!mfr){const g=inferMfrFromCatalog(cat);if(g){mfr=g;mfrInf=true;}}
         return {
           equipmentType:c.equipment_type||"",
-          manufacturer:c.manufacturer||"",
+          manufacturer:mfr,mfrInferred:mfrInf,
           modelNumber:c.model_or_type||"",
           catalogNumber:c.model_or_type||"",
           serialNumber:"",
           voltageRating:c.voltage||"",
           amperageRating:String(c.amperage||"").replace(/[^0-9]/g,""),
           quantity:overrideQty||1,grade:c.grade||"C",
-          nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",
+          nemaRating:c.nema_rating||c.nema||"",indoorOutdoor:"indoor",yearMfg:"",
           phase:"3",kvaRating:"",kvaForced:"",
           windingMaterial:"",windingHv:"",windingLv:"",
           interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
-          frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",
+          frameSize:c.frame_size||"",tripRating:c.trip_rating||"",breakerType:c.breaker_type||"",tripUnitType:c.trip_unit||c.trip_unit_type||"",mountingType:c.mounting_type||"",
           busRating:"",shortCircuitRating:"",bilKv:"",voltageClass:"",numSections:"",busMaterial:"",switchgearType:"",
           disposition:"unassigned",estimatedResale:0,estimatedScrap:0,
           ebayCompAvg:0,priceBookValue:0,estimatedWeight:0,
@@ -1368,9 +1409,13 @@ ${header}
         };
       };
       // Build a row from a breaker group with proper quantity
-      const buildBreakerGroupRow=(g)=>({
+      const buildBreakerGroupRow=(g)=>{
+        let mfr=matchMfr(g.mfr)||g.mfr||"";
+        let mfrInf=false;
+        if(!mfr){const x=inferMfrFromCatalog(g.model||"");if(x){mfr=x;mfrInf=true;}}
+        return {
         equipmentType:"Circuit Breaker",
-        manufacturer:g.mfr||"",
+        manufacturer:mfr,mfrInferred:mfrInf,
         modelNumber:g.model||"",
         catalogNumber:g.model||"",
         serialNumber:"",
@@ -1392,7 +1437,42 @@ ${header}
         acquisitionCost:"",refurbCost:"",askingPrice:"",
         barcodeSku:"",putawayLocation:"",putawayQty:1,skidId:"",
         pickupStatus:"pending",destination:"main_warehouse",
-      });
+        };
+      };
+      // Build a rich row from a scan-nameplate response (full single-unit extraction).
+      const rowFromNameplate=(p,photoUrl,fallbackComp)=>{
+        const base=buildRow(fallbackComp||{},[]);
+        const isTransformer=p.equipment_type&&p.equipment_type.toLowerCase().includes("transformer");
+        const kva=p.kva_rating||(isTransformer?p.amperage_rating:null);
+        const amps=isTransformer?null:(p.amperage_rating||null);
+        const whv=p.winding_hv||null,wlv=p.winding_lv||null;
+        let winding=p.winding_material||null;if(!winding&&whv)winding=whv===wlv?whv:`${whv}/${wlv}`;
+        const cooling=p.cooling_class||null;
+        const liquid=p.liquid_type||(cooling&&(cooling.startsWith("OA")||cooling.startsWith("O"))?"OIL":cooling&&(cooling.startsWith("AA")||cooling==="dry")?"DRY":null);
+        const eqMatch=EQ.find(t=>p.equipment_type&&t.toLowerCase().includes(p.equipment_type.toLowerCase()))||EQ.find(t=>p.equipment_type&&p.equipment_type.toLowerCase().includes(t.toLowerCase()))||base.equipmentType||"Other";
+        const cat=p.catalog_number||p.model_number||"";
+        let mfr=matchMfr(p.manufacturer)||p.manufacturer||"";
+        let mfrInf=false;
+        if(!mfr){const g=inferMfrFromCatalog(cat);if(g){mfr=g;mfrInf=true;}}
+        return {...base,
+          equipmentType:eqMatch,
+          manufacturer:mfr,mfrInferred:mfrInf,
+          modelNumber:p.model_number||p.catalog_number||base.modelNumber||"",
+          catalogNumber:p.catalog_number||p.model_number||base.catalogNumber||"",
+          serialNumber:p.serial_number||"",
+          voltageRating:p.voltage_rating||"",
+          amperageRating:amps?String(amps).replace(/[^0-9]/g,""):"",
+          kvaRating:kva||"",
+          phase:p.phase?String(p.phase).replace(/[^0-9]/g,""):"3",
+          yearMfg:p.year_manufactured||"",
+          nemaRating:p.nema_rating||"",
+          windingMaterial:winding||"",windingHv:whv||"",windingLv:wlv||"",
+          coolingClass:cooling||"",liquidType:liquid||"",
+          frameSize:p.frame_size||"",tripRating:p.trip_rating||"",breakerType:p.breaker_type||"",tripUnitType:p.trip_unit_type||"",mountingType:p.mounting_type||"",
+          interruptRating:p.interrupting_rating||"",busRating:p.bus_rating||"",voltageClass:p.voltage_class||"",
+          photos:photoUrl?[photoUrl]:base.photos,
+        };
+      };
       const newRows=[];
       // Real detected parents become their own rows (one per parent, no nested breakers)
       for(const par of parents)newRows.push(buildRow(par,[]));
@@ -1403,8 +1483,31 @@ ${header}
       }
       // Grouped breaker rows, one per (mfr, amp, poles) combination
       for(const g of groupedBreakerRows)newRows.push(buildBreakerGroupRow(g));
-      // Other equipment (transformers, etc.) - one row each
-      for(const o of others)newRows.push(buildRow(o,[]));
+      // Other equipment (transformers, panels, UPS, CRAC, etc.): route each through the full
+      // nameplate scan so it gets typed and fielded properly, instead of the lineup's "Other".
+      const otherNoSrc=[];
+      const otherBySrc={};
+      for(const o of others){
+        const n=parseInt(String(o.source_image==null?"":o.source_image).replace(/\D/g,""));
+        if(n>=1&&n<=uploaded.length)(otherBySrc[n]=otherBySrc[n]||[]).push(o);
+        else otherNoSrc.push(o);
+      }
+      const otherKeys=Object.keys(otherBySrc);
+      for(let oi=0;oi<otherKeys.length;oi++){
+        setBulkBusy({step:"nameplate",progress:oi,total:otherKeys.length});
+        const n=parseInt(otherKeys[oi]);
+        const up=uploaded[n-1];
+        const comp=otherBySrc[otherKeys[oi]][0];
+        let placed=false;
+        if(up&&up.b64){
+          try{
+            const r=await fetch(`${SB}/functions/v1/scan-nameplate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image_base64:up.b64,media_type:"image/jpeg"})});
+            if(r.ok){const pp=await r.json();if(pp&&!pp.error){newRows.push(rowFromNameplate(pp,up.photoUrl,comp));placed=true;}}
+          }catch{/* fall through to lineup row */}
+        }
+        if(!placed)newRows.push(buildRow(comp,[]));
+      }
+      for(const o of otherNoSrc)newRows.push(buildRow(o,[]));
 
       // 5. Apply auto-derivations (price book, scrap, weight) mirroring uItem's logic
       const enriched=newRows.map(r=>{
@@ -1473,7 +1576,7 @@ ${header}
   };
 
   const addItem=()=>setItems(p=>[...p,{
-    equipmentType:"",manufacturer:"",modelNumber:"",serialNumber:"",
+    equipmentType:"",manufacturer:"",mfrInferred:false,modelNumber:"",serialNumber:"",
     voltageRating:"",amperageRating:"",quantity:1,grade:"C",
     nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",phase:"3",kvaRating:"",kvaForced:"",windingMaterial:"",windingHv:"",windingLv:"",interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
     frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",catalogNumber:"",
@@ -1968,7 +2071,7 @@ ${header}
             + Bulk Photo Intake
           </label>
           {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
-            {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?`AI batch ${bulkBusy.progress}/${bulkBusy.total}...`:"Processing..."}
+            {bulkBusy.step==="upload"?`Uploading ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="analyze"?`AI batch ${bulkBusy.progress}/${bulkBusy.total}...`:bulkBusy.step==="nameplate"?`Nameplate scan ${bulkBusy.progress}/${bulkBusy.total}...`:"Processing..."}
           </div>}
         </div>
         <div
@@ -2046,7 +2149,7 @@ ${header}
 
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Type</label><select style={inpSm} value={it.equipmentType} onChange={e=>uItem(i,"equipmentType",e.target.value)}><option value="">Select</option>{EQ.map(t=><option key={t}>{t}</option>)}</select></div>
-              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Mfr</label><select style={inpSm} value={it.manufacturer} onChange={e=>uItem(i,"manufacturer",e.target.value)}><option value="">Select</option>{MFR.map(m=><option key={m}>{m}</option>)}</select></div>
+              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Mfr{it.mfrInferred?<span style={{color:"#a16207",fontWeight:700}}> . inferred</span>:""}</label><select style={it.mfrInferred?{...inpSm,borderColor:"#f59e0b",background:"#fffbeb"}:inpSm} value={it.manufacturer} onChange={e=>{uItem(i,"manufacturer",e.target.value);uItem(i,"mfrInferred",false);}}><option value="">Select</option>{MFR.map(m=><option key={m}>{m}</option>)}</select></div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:8}}>
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>S/N</label><input style={inpSm} value={it.serialNumber} onChange={e=>{uItem(i,"serialNumber",e.target.value);if(e.target.value.trim())uItem(i,"quantity",1);}}/></div>
