@@ -74,6 +74,103 @@ async function captureCompSnapshot(invId,item){
 async function sG(k){try{if(typeof window!=="undefined"&&window.storage){const r=await window.storage.get(k);return r?JSON.parse(r.value):null;}}catch{}return null;}
 async function sS(k,v){try{if(typeof window!=="undefined"&&window.storage)await window.storage.set(k,JSON.stringify(v));}catch{}}
 
+/* -- Facilities / locations / movements ------------------ */
+const FACILITIES=["3030","3031","8600","SA"];
+const MODE_COLOR={walkthrough:"#3d5e3f",receive:"#16a34a",putaway:"#a16207",quick:"#0891b2",pick:"#7c3aed"};
+/* Where an inbound transfer lands at the destination facility.
+   8600 and SA have no REC dock seeded, so they land at their general zone. */
+const TRANSFER_LANDING={"3030":"3030 REC","3031":"3031 REC","8600":"8600 LOCATIONS","SA":"SA"};
+const STORAGE_ZONE={"3030":"3030 STORAGE","3031":"3031 STORAGE","8600":"8600 LOCATIONS","SA":"SA"};
+
+/* Within-facility move targets, ordered per facility (matches seeded zones). */
+function withinTargets(facility){
+  const z=(s)=>`${facility} ${s}`;
+  const all={
+    production:{key:"production",label:"Production",tag:"production",toState:"in_production",toCode:z("PROD")},
+    staging:{key:"staging",label:"Prod Staging",tag:"prod_staging",toState:"staging",toCode:z("PROD STAGE")},
+    qc:{key:"qc",label:"QC",tag:"qc",toState:"at_qc",toCode:null}, // location unchanged
+    test:{key:"test",label:"Test",tag:"test",toState:"at_test",toCode:z("TEST")},
+    will_call:{key:"will_call",label:"Will Call",tag:"will_call",toState:"at_will_call",toCode:z("WILL CALL")},
+    shipping:{key:"shipping",label:"Shipping",tag:"shipping",toState:"at_shipping",toCode:z("SHIP")},
+    storage:{key:"storage",label:"Storage",tag:"storage",toState:"on_shelf",toCode:STORAGE_ZONE[facility]},
+  };
+  const order={
+    "3030":["production","staging","test","shipping","storage"],
+    "3031":["production","staging","qc","test","will_call","shipping","storage"],
+    "8600":["will_call"],
+    "SA":[],
+  };
+  return (order[facility]||[]).map(k=>all[k]);
+}
+function transferTargets(facility){
+  return FACILITIES.filter(f=>f!==facility).map(f=>({
+    key:`transfer_${f}`,label:`Transfer to ${f}`,tag:`transfer_${f}`,
+    toState:"on_dock",toCode:TRANSFER_LANDING[f],
+  }));
+}
+async function logMovement(row){
+  try{await dbF("inventory_movements",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(row)});return true;}
+  catch{return false;}
+}
+/* Apply one target to one item: PATCH inventory_items + write a movement row.
+   QC keeps location_detail; everything else sets it to the target code. */
+async function moveItem(item,target,movedBy){
+  const fromState=item.physical_state||null;
+  const fromLoc=item.location_detail||null;
+  const toLoc=target.toCode!=null?target.toCode:(fromLoc||"UNASSIGNED");
+  const patch={physical_state:target.toState};
+  if(target.toCode!=null)patch.location_detail=target.toCode;
+  await dbF(`inventory_items?id=eq.${encodeURIComponent(item.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify(patch)});
+  await logMovement({inventory_id:item.id,from_location:fromLoc,to_location:toLoc,from_state:fromState,to_state:target.toState,destination_tag:target.tag,moved_by:movedBy||null,notes:null});
+  return {id:item.id,physical_state:target.toState,location_detail:target.toCode!=null?target.toCode:item.location_detail};
+}
+
+/* -- Location typeahead (reads cached locations for a facility) -- */
+function LocationPicker({locations,value,onChange,accent="#a16207",placeholder="Type code or name..."}){
+  const [q,setQ]=useState(value||"");
+  const [open,setOpen]=useState(false);
+  useEffect(()=>{setQ(value||"");},[value]);
+  const ql=q.trim().toLowerCase();
+  const list=locations||[];
+  const matches=(ql?list.filter(l=>l.code.toLowerCase().includes(ql)||(l.display_name||"").toLowerCase().includes(ql)):list).slice(0,40);
+  return(
+    <div style={{position:"relative"}}>
+      <input value={q}
+        onChange={e=>{const v=e.target.value.toUpperCase();setQ(v);onChange(v);setOpen(true);}}
+        onFocus={()=>setOpen(true)}
+        onBlur={()=>setTimeout(()=>setOpen(false),150)}
+        placeholder={placeholder}
+        style={{boxSizing:"border-box",width:"100%",padding:"14px 16px",fontSize:16,fontWeight:700,letterSpacing:0.5,borderRadius:10,border:`2px solid ${accent}`,background:"#fff",textTransform:"uppercase"}}/>
+      {open&&matches.length>0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:50,background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,boxShadow:"0 10px 30px rgba(0,0,0,0.15)",maxHeight:260,overflowY:"auto"}}>
+        {matches.map(l=><div key={l.code} onMouseDown={()=>{onChange(l.code);setQ(l.code);setOpen(false);}} style={{padding:"10px 12px",cursor:"pointer",borderBottom:"1px solid #f1f5f9"}}>
+          <div style={{fontSize:13,fontWeight:800,color:"#1e293b"}}>{l.code}</div>
+          <div style={{fontSize:11,color:"#64748b"}}>{l.display_name}{l.kind?` . ${l.kind}`:""}</div>
+        </div>)}
+      </div>}
+    </div>
+  );
+}
+
+/* -- Move destination panel (grouped buttons, facility-aware) -- */
+function MovePanel({facility,count,busy,onPick}){
+  const within=withinTargets(facility);
+  const transfer=transferTargets(facility);
+  const Btn=({t})=>(
+    <button disabled={busy} onClick={()=>onPick(t)} style={{padding:"12px 10px",borderRadius:10,border:`2px solid ${MODE_COLOR.pick}`,background:busy?"#f1f5f9":"#fff",color:MODE_COLOR.pick,fontSize:13,fontWeight:800,cursor:busy?"wait":"pointer",textAlign:"left"}}>{t.label}</button>
+  );
+  return(
+    <div>
+      {within.length>0&&<>
+        <div style={{fontSize:11,fontWeight:800,color:"#64748b",letterSpacing:1,margin:"4px 0 8px"}}>WITHIN FACILITY ({facility})</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>{within.map(t=><Btn key={t.key} t={t}/>)}</div>
+      </>}
+      <div style={{fontSize:11,fontWeight:800,color:"#64748b",letterSpacing:1,margin:"4px 0 8px"}}>TRANSFER TO FACILITY</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>{transfer.map(t=><Btn key={t.key} t={t}/>)}</div>
+      {count!=null&&<div style={{fontSize:11,color:"#94a3b8",marginTop:10}}>Applies to {count} selected item{count===1?"":"s"}. Transfers land on the destination dock as on_dock.</div>}
+    </div>
+  );
+}
+
 /* -- Constants ------------------------------------------- */
 const EQ=["Switchgear","Panelboard","Transformer","Circuit Breaker","Motor Control Center (MCC)","Bus Duct","Disconnect Switch","UPS System","PDU","RPP (Remote Power Panel)","ATS / Transfer Switch","VFD / Drive","Motor Starter","Control Transformer","Trip Unit","Relay","CT / PT","Meter","Bin Breaker","Mounting Kit","Gasket","Bus Bar","Wire","Inner","Nuts and Bolts","Other"];
 const BULK_TYPES=new Set(["Bin Breaker","Mounting Kit","Gasket","Bus Bar","Wire","Inner","Nuts and Bolts"]);
@@ -253,6 +350,142 @@ export default function Walkthrough() {
   const [skids,setSkids]=useState([]);
   const [newSkidName,setNewSkidName]=useState("");
 
+  /* -- Facility + locations cache -- */
+  const [currentFacility,setCurrentFacility]=useState("3030");
+  const [locByFac,setLocByFac]=useState({}); // {facility:[{code,display_name,kind,sort_order}]}
+  const [locLoading,setLocLoading]=useState(false);
+  const movedBy=(()=>{try{return (typeof localStorage!=="undefined"&&localStorage.getItem("hpg_tech"))||"powergate";}catch{return "powergate";}})();
+  const facLocs=locByFac[currentFacility]||[];
+
+  /* -- Q-mode sub-workflow -- */
+  const [qcSub,setQcSub]=useState("parts_add"); // parts_add | cycle_count | location_verify
+  const [ccLoc,setCcLoc]=useState("");
+  const [ccItems,setCcItems]=useState([]);
+  const [ccLoading,setCcLoading]=useState(false);
+  const [ccStatus,setCcStatus]=useState({}); // {id:'verified'|'discrepant'}
+  const [lvSerial,setLvSerial]=useState("");
+  const [lvItem,setLvItem]=useState(null);
+  const [lvNewLoc,setLvNewLoc]=useState("");
+  const [lvLoading,setLvLoading]=useState(false);
+
+  /* -- Pick mode + Inv batch select -- */
+  const [pickSearch,setPickSearch]=useState("");
+  const [pickSet,setPickSet]=useState(()=>new Set());
+  const [pickBusy,setPickBusy]=useState(false);
+  const [invSel,setInvSel]=useState(()=>new Set());
+  const [invMoveOpen,setInvMoveOpen]=useState(false);
+  const [invMoveBusy,setInvMoveBusy]=useState(false);
+  const [splitModal,setSplitModal]=useState(null); // the bulk lot being split
+  const [splitQty,setSplitQty]=useState(1);
+  const [splitBusy,setSplitBusy]=useState(false);
+  const [ohTab,setOhTab]=useState("items"); // items | onhand
+  const [ohRows,setOhRows]=useState([]);
+  const [ohLoading,setOhLoading]=useState(false);
+  const [ohSearch,setOhSearch]=useState("");
+
+  const changeFacility=(f)=>{setCurrentFacility(f);try{localStorage.setItem("hpg_currentFacility",f);}catch{}};
+  const loadLocations=useCallback(async(facility)=>{
+    if(!facility||locByFac[facility])return;
+    setLocLoading(true);
+    try{
+      const rows=await dbF(`locations?select=code,display_name,kind,sort_order&facility=eq.${encodeURIComponent(facility)}&kind=in.(rack,floor,zone,workflow)&is_active=eq.true&order=sort_order.asc,code.asc`);
+      setLocByFac(prev=>({...prev,[facility]:rows||[]}));
+    }catch(e){setMsg({t:"error",m:"Location load failed: "+e.message});}
+    setLocLoading(false);
+  },[locByFac]);
+
+  /* -- Q-mode: Cycle Count -- */
+  const loadCycleCount=async(code)=>{
+    const c=(code||"").trim().toUpperCase();
+    if(!c){setMsg({t:"error",m:"Pick a location first"});return;}
+    setCcLoading(true);setCcItems([]);setCcStatus({});
+    try{
+      const rows=await dbF(`inventory_items?select=id,equipment_type,manufacturer,model_number,serial_number,grade,physical_state,location_detail&location_detail=eq.${encodeURIComponent(c)}&order=equipment_type.asc&limit=500`);
+      setCcItems(rows||[]);
+      if(!rows||rows.length===0)setMsg({t:"info",m:`Nothing recorded at ${c}.`});
+    }catch(e){setMsg({t:"error",m:"Cycle count load failed: "+e.message});}
+    setCcLoading(false);
+  };
+  const markCycle=async(item,status)=>{
+    setCcStatus(p=>({...p,[item.id]:status}));
+    await logMovement({inventory_id:item.id,from_location:item.location_detail||null,to_location:item.location_detail||ccLoc,from_state:item.physical_state||null,to_state:item.physical_state||null,destination_tag:"cycle_count",moved_by:movedBy,notes:status});
+  };
+
+  /* -- Q-mode: Location Verify -- */
+  const lookupVerify=async(serial)=>{
+    const s=(serial||"").trim();
+    if(!s){setMsg({t:"error",m:"Enter or scan a serial"});return;}
+    setLvLoading(true);setLvItem(null);
+    try{
+      const rows=await dbF(`inventory_items?select=id,equipment_type,manufacturer,model_number,serial_number,grade,physical_state,location_detail&serial_number=eq.${encodeURIComponent(s)}&limit=10`);
+      if(!rows||rows.length===0){setMsg({t:"info",m:`No item with serial ${s}.`});}
+      else{setLvItem(rows[0]);setLvNewLoc(rows[0].location_detail||"");if(rows.length>1)setMsg({t:"info",m:`${rows.length} items share that serial; showing the first.`});}
+    }catch(e){setMsg({t:"error",m:"Lookup failed: "+e.message});}
+    setLvLoading(false);
+  };
+  const confirmVerifyLoc=async()=>{
+    if(!lvItem)return;
+    await logMovement({inventory_id:lvItem.id,from_location:lvItem.location_detail||null,to_location:lvItem.location_detail||"UNASSIGNED",from_state:lvItem.physical_state||null,to_state:lvItem.physical_state||null,destination_tag:"location_verify",moved_by:movedBy,notes:"confirmed"});
+    setMsg({t:"success",m:"Location confirmed."});setLvItem(null);setLvSerial("");
+  };
+  const correctVerifyLoc=async()=>{
+    if(!lvItem)return;
+    const code=(lvNewLoc||"").trim().toUpperCase();
+    if(!code){setMsg({t:"error",m:"Pick the correct location"});return;}
+    try{
+      await dbF(`inventory_items?id=eq.${encodeURIComponent(lvItem.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({location_detail:code})});
+      await logMovement({inventory_id:lvItem.id,from_location:lvItem.location_detail||null,to_location:code,from_state:lvItem.physical_state||null,to_state:lvItem.physical_state||null,destination_tag:"location_verify",moved_by:movedBy,notes:"corrected"});
+      setInv(prev=>prev.map(r=>r.id===lvItem.id?{...r,location_detail:code}:r));
+      setMsg({t:"success",m:`Location corrected to ${code}.`});setLvItem(null);setLvSerial("");
+    }catch(e){setMsg({t:"error",m:"Correction failed: "+e.message});}
+  };
+
+  /* -- Shared: apply a move target to a set of inventory ids -- */
+  const applyMoveToSet=async(target,ids,onDone)=>{
+    const items=inv.filter(r=>ids.has(r.id));
+    if(items.length===0){setMsg({t:"error",m:"Nothing selected"});return;}
+    let ok=0;const updates={};
+    for(const it of items){
+      try{const u=await moveItem(it,target,movedBy);updates[u.id]=u;ok++;}catch{/* keep going */}
+    }
+    setInv(prev=>prev.map(r=>updates[r.id]?{...r,...updates[r.id]}:r));
+    setMsg({t:ok===items.length?"success":"error",m:`Moved ${ok}/${items.length} to ${target.label}.`});
+    onDone&&onDone();
+  };
+
+  /* Split a partial qty off a bulk lot and move it. Spawns a child lot, decrements source. */
+  const splitMove=async(item,moveQty,target)=>{
+    const total=parseInt(item.qty)||1;
+    const q=parseInt(moveQty)||0;
+    if(q<1||q>=total){setMsg({t:"error",m:`Split qty must be between 1 and ${total-1}. To move all ${total}, use Move instead.`});return;}
+    setSplitBusy(true);
+    try{
+      const newId=newInvId();
+      const toLoc=target.toCode!=null?target.toCode:(item.location_detail||"UNASSIGNED");
+      const copy=k=>item[k]!=null?item[k]:null;
+      const newLot={
+        id:newId,tracking_mode:"quantity",qty:q,serial_number:null,
+        equipment_type:copy("equipment_type"),manufacturer:copy("manufacturer"),
+        model_number:copy("model_number"),catalog_number:copy("catalog_number"),
+        amperage_rating:copy("amperage_rating"),voltage_rating:copy("voltage_rating"),
+        kva_rating:copy("kva_rating"),phase:copy("phase"),poles:copy("poles"),
+        grade:copy("grade"),breaker_type:copy("breaker_type"),frame_size:copy("frame_size"),
+        trip_rating:copy("trip_rating"),voltage_class:copy("voltage_class"),
+        location:copy("location"),location_detail:toLoc,
+        customer_origin:copy("customer_origin"),source_job_site:copy("source_job_site"),
+        date_received:copy("date_received"),status:copy("status")||"received",
+        physical_state:target.toState,scanned_by:movedBy,split_from_id:item.id,
+      };
+      await dbF("inventory_items",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(newLot)});
+      await dbF(`inventory_items?id=eq.${encodeURIComponent(item.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({qty:total-q})});
+      await logMovement({inventory_id:item.id,from_location:item.location_detail||null,to_location:toLoc,from_state:item.physical_state||null,to_state:target.toState,destination_tag:target.tag,qty:q,moved_by:movedBy,notes:`split ${q} of ${total} to ${newId}`});
+      setMsg({t:"success",m:`Split ${q} to ${target.label}. ${total-q} left at ${item.location_detail||"origin"}.`});
+      setSplitModal(null);setSplitQty(1);
+      loadInventory();
+    }catch(e){setMsg({t:"error",m:"Split failed: "+e.message});}
+    setSplitBusy(false);
+  };
+
   const loadSkids=useCallback(async()=>{
     try{const data=await dbF("skid_builds?select=*&order=created_at.desc&limit=50");if(data)setSkids(data);}catch{}
   },[]);
@@ -271,6 +504,13 @@ export default function Walkthrough() {
       else{const local=await sG("wes_inventory");if(local)setInv(local);}
     }catch{}
     setInvLoading(false);
+  },[]);
+
+  const loadOnHand=useCallback(async()=>{
+    setOhLoading(true);
+    try{const rows=await dbF("v_stock_on_hand?select=*&order=on_hand.desc.nullslast&limit=1000");setOhRows(rows||[]);}
+    catch(e){setMsg({t:"error",m:"On-hand load failed: "+e.message});}
+    setOhLoading(false);
   },[]);
 
   /* === PUTAWAY MODE ===
@@ -314,6 +554,7 @@ export default function Walkthrough() {
         headers:{Prefer:"return=minimal"},
         body:JSON.stringify({physical_state:"on_shelf",location_detail:code}),
       });
+      await logMovement({inventory_id:putawayItem.id,from_location:null,to_location:code,from_state:"on_dock",to_state:"on_shelf",destination_tag:"putaway",moved_by:movedBy,notes:null});
       setPutawayLastDone({id:putawayItem.id,code});
       setMsg({t:"success",m:`Put away ${putawayItem.equipment_type||"item"} to ${code}.`});
       setPutawayQueue(q=>q.filter(x=>x.id!==putawayItem.id));
@@ -372,6 +613,9 @@ export default function Walkthrough() {
   },[]);
   useEffect(()=>{loadJobs();},[loadJobs]);
   useEffect(()=>{if(mode==="putaway"&&view==="new")loadPutawayQueue();},[mode,view,loadPutawayQueue]);
+  useEffect(()=>{try{const f=localStorage.getItem("hpg_currentFacility");if(f&&FACILITIES.includes(f))setCurrentFacility(f);}catch{}},[]);
+  useEffect(()=>{if(view==="new"&&(mode==="putaway"||mode==="quick"||mode==="pick"))loadLocations(currentFacility);},[view,mode,currentFacility,loadLocations]);
+  useEffect(()=>{if(view==="new"&&mode==="pick")loadInventory();},[view,mode,loadInventory]);
 
   const uf=(k,v)=>{setJob(p=>({...p,[k]:v}));if(errs[k])setErrs(p=>({...p,[k]:undefined}));};
 
@@ -511,6 +755,7 @@ export default function Walkthrough() {
         amperageRating:p.amperage_rating||"",
         kvaRating:p.kva_rating||"",
         phase:p.phase?String(p.phase).replace(/[^0-9]/g,""):"3",
+        poles:(p.poles||p.pole_count||p.num_poles||p.number_of_poles)?String(p.poles||p.pole_count||p.num_poles||p.number_of_poles).replace(/[^0-9]/g,""):"",
         yearMfg:p.year_manufactured||"",
         grade:"C",
         qty:parseInt(p.quantity_visible)||1,
@@ -550,6 +795,7 @@ export default function Walkthrough() {
         date_received:mode==="receive"?(job.bidDate||today()):today(),
         scanned_by:mode==="receive"?(job.preparedBy||"receive"):"quick_capture",
         kva_rating:qcItem.kvaRating||null,phase:qcItem.phase||"3",
+        poles:qcItem.poles||null,
         year_manufactured:qcItem.yearMfg?parseInt(qcItem.yearMfg)||null:null,
         frame_size:p.frame_size||null,trip_rating:p.trip_rating||null,
         interrupting_rating:p.interrupting_rating||null,breaker_type:p.breaker_type||null,
@@ -569,6 +815,7 @@ export default function Walkthrough() {
         }catch{}}
         ok=true;
         captureCompSnapshot(invId,invRow); // non-blocking
+        if(mode==="quick"&&invRow.location_detail){await logMovement({inventory_id:invId,from_location:null,to_location:invRow.location_detail,from_state:null,to_state:"on_shelf",destination_tag:"parts_add",moved_by:movedBy,notes:null});}
       }catch{loc=true;}}
       if(!ok){const stored=await sG("wes_inv")||[];await sS("wes_inv",[{...invRow,_photo:qcItem.photo,created_at:new Date().toISOString()},...stored]);}
       setQcSession(prev=>[...prev,{...invRow,_photo:qcItem.photo}]);
@@ -1670,12 +1917,15 @@ ${header}
         <div style={{display:"flex",alignItems:"center",gap:8}}><LogoMark size={28} /><div><div style={{fontSize:16,fontWeight:800,color:"#565756",letterSpacing:2}}>HARDIN</div><div style={{fontSize:9,color:"#58815a",fontWeight:700,letterSpacing:1.5}}>POWERGATE</div></div></div>
         <div style={{display:"flex",gap:4}}>
           {[{k:"new",l:"+"},{k:"jobs",l:"Jobs"},{k:"inventory",l:"Inv"}].map(t=><button key={t.k} onClick={()=>{setView(t.k);if(t.k==="inventory")loadInventory();}} style={{padding:"8px 14px",borderRadius:8,border:"none",background:view===t.k?"#3d5e3f":"#e2e8f0",color:view===t.k?"#fff":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>{t.l}</button>)}
+          <select value={currentFacility} onChange={e=>changeFacility(e.target.value)} title="Current facility" style={{padding:"8px 8px",borderRadius:8,border:"1.5px solid #cbd5e1",background:"#fff",color:"#3d5e3f",fontWeight:800,fontSize:12,cursor:"pointer",WebkitAppearance:"none"}}>
+            {FACILITIES.map(f=><option key={f} value={f}>{f}</option>)}
+          </select>
           <button onClick={()=>{setHelpOpen(true);loadHelpDocs();}} title="Help" style={{padding:"8px 12px",borderRadius:8,border:"none",background:"#e2e8f0",color:"#64748b",fontWeight:800,fontSize:13,cursor:"pointer"}}>?</button>
         </div>
       </div>
 
       {view==="new"&&<div style={{display:"flex",gap:4,marginBottom:12}}>
-        {[{m:"walkthrough",i:"[W]",l:"Walkthrough",s:""},{m:"receive",i:"[R]",l:"Receive",s:"Dock arrival"},{m:"putaway",i:"[P]",l:"Putaway",s:"Dock to shelf"},{m:"quick",i:"[Q]",l:"Quick",s:"Location walk"}].map(({m,i,l,s})=><button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"10px 4px",borderRadius:10,border:`2.5px solid ${mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":m==="putaway"?"#a16207":"#3d5e3f"):"#e2e8f0"}`,background:mode===m?(m==="quick"?"#0891b2":m==="receive"?"#16a34a":m==="putaway"?"#a16207":"#3d5e3f"):"#fff",color:mode===m?"#fff":"#64748b",fontWeight:800,fontSize:12,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+        {[{m:"walkthrough",i:"[W]",l:"Walk",s:""},{m:"receive",i:"[R]",l:"Receive",s:"Dock in"},{m:"putaway",i:"[P]",l:"Putaway",s:"To shelf"},{m:"quick",i:"[Q]",l:"Quick",s:"Loc walk"},{m:"pick",i:"[K]",l:"Pick",s:"Move stock"}].map(({m,i,l,s})=><button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"10px 2px",borderRadius:10,border:`2.5px solid ${mode===m?MODE_COLOR[m]:"#e2e8f0"}`,background:mode===m?MODE_COLOR[m]:"#fff",color:mode===m?"#fff":"#64748b",fontWeight:800,fontSize:11,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
           <div>{i} {l}</div>{s&&<div style={{fontSize:9,fontWeight:600,opacity:mode===m?0.9:0.7}}>{s}</div>}
         </button>)}
       </div>}
@@ -2011,19 +2261,21 @@ ${header}
             <div style={{fontSize:11,color:"#64748b"}}>S/N: {putawayItem.serial_number||"UNKNOWN"}</div>
             <div style={{fontSize:11,color:"#64748b"}}>{[putawayItem.amperage_rating&&`${putawayItem.amperage_rating}A`,putawayItem.voltage_rating,putawayItem.grade&&`Grade ${putawayItem.grade}`].filter(Boolean).join(" . ")}</div>
           </div>
-          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#475569",marginBottom:6,letterSpacing:0.5}}>SHELF / RACK LOCATION CODE *</label>
-          <input
-            autoFocus
-            value={putawayLoc}
-            onChange={e=>setPutawayLoc(e.target.value.toUpperCase())}
-            onKeyDown={e=>{if(e.key==="Enter"&&!putawayBusy&&putawayLoc.trim())doPutaway();}}
-            placeholder="e.g. A-12-3"
-            style={{boxSizing:"border-box",width:"100%",padding:"14px 16px",fontSize:18,fontWeight:700,letterSpacing:1,borderRadius:10,border:"2px solid #a16207",background:"#fff",marginBottom:14,textTransform:"uppercase"}}/>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#475569",marginBottom:6,letterSpacing:0.5}}>SHELF / RACK LOCATION CODE * <span style={{color:"#a16207"}}>({currentFacility}{locLoading?" . loading":` . ${facLocs.length} codes`})</span></label>
+          <div style={{marginBottom:14}}>
+            <LocationPicker locations={facLocs} value={putawayLoc} onChange={setPutawayLoc} accent="#a16207" placeholder="e.g. MWH-A-1-1 or 3030 STORAGE"/>
+          </div>
           <button onClick={doPutaway} disabled={putawayBusy||!putawayLoc.trim()} style={{width:"100%",padding:18,borderRadius:12,border:"none",background:putawayBusy||!putawayLoc.trim()?"#94a3b8":"linear-gradient(135deg,#a16207,#854d0e)",color:"#fff",fontSize:16,fontWeight:800,cursor:putawayBusy||!putawayLoc.trim()?"not-allowed":"pointer"}}>{putawayBusy?"Saving...":`Put Away to ${putawayLoc||"..."}`}</button>
         </div>}
       </div>}
 
-      {view==="new"&&(mode==="quick"||mode==="receive")&&<div>
+      {view==="new"&&mode==="quick"&&<div style={{display:"flex",gap:4,marginBottom:12}}>
+        {[{k:"parts_add",l:"Parts Add",s:"Pick loc, scan, save"},{k:"cycle_count",l:"Cycle Count",s:"Verify a shelf"},{k:"location_verify",l:"Loc Verify",s:"Scan, confirm loc"}].map(({k,l,s})=><button key={k} onClick={()=>setQcSub(k)} style={{flex:1,padding:"9px 4px",borderRadius:9,border:`2px solid ${qcSub===k?"#0891b2":"#e2e8f0"}`,background:qcSub===k?"#0891b2":"#fff",color:qcSub===k?"#fff":"#64748b",fontWeight:800,fontSize:11,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <div>{l}</div><div style={{fontSize:9,fontWeight:600,opacity:qcSub===k?0.9:0.7}}>{s}</div>
+        </button>)}
+      </div>}
+
+      {view==="new"&&(mode==="receive"||(mode==="quick"&&qcSub==="parts_add"))&&<div>
         {qcPhase!=="location"&&<div style={{position:"sticky",top:0,zIndex:10,background:mode==="receive"?"#16a34a":"#0891b2",color:"#fff",padding:"10px 14px",borderRadius:10,marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div style={{fontSize:13,fontWeight:700}}>
             {mode==="quick"?<>
@@ -2038,11 +2290,11 @@ ${header}
         </div>}
 
         {qcPhase==="location"&&mode==="quick"&&<div style={card}>
-          <div style={{fontSize:18,fontWeight:800,marginBottom:6}}>Where are you walking?</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:16}}>Read the sticker code on the shelf. Type it exactly. Stays set until you change it.</div>
+          <div style={{fontSize:18,fontWeight:800,marginBottom:6}}>Parts Add . pick the location first</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:16}}>Pick the shelf or zone you are standing at ({currentFacility}). It locks in, then every scan saves there until you change it.</div>
           <div style={{marginBottom:16}}>
-            <label style={lbl}>Location code</label>
-            <input style={{...inp,fontSize:20,padding:"16px 14px",letterSpacing:1}} value={qcLocationCode} onChange={e=>setQcLocationCode(e.target.value)} placeholder="e.g. 1-2-3-5 or FN" autoFocus/>
+            <label style={lbl}>Location code{locLoading?" . loading":` . ${facLocs.length} codes`}</label>
+            <LocationPicker locations={facLocs} value={qcLocationCode} onChange={setQcLocationCode} accent="#0891b2" placeholder="e.g. MWH-A-1-1 or 3030 STORAGE"/>
           </div>
           <button onClick={()=>{if(!qcLocationCode.trim()){setMsg({t:"error",m:"Location code required"});return;}setMsg(null);setQcPhase("capture");}} style={{width:"100%",padding:18,borderRadius:12,border:"none",background:"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer"}}>Start Capturing &rarr;</button>
         </div>}
@@ -2109,6 +2361,12 @@ ${header}
               <div><label style={lbl}>Amps</label><input style={inp} value={qcItem.amperageRating} onChange={e=>setQcItem(i=>({...i,amperageRating:e.target.value}))}/></div>
               <div><label style={lbl}>Volts</label><input style={inp} value={qcItem.voltageRating} onChange={e=>setQcItem(i=>({...i,voltageRating:e.target.value}))}/></div>
               <div><label style={lbl}>KVA</label><input style={inp} value={qcItem.kvaRating} onChange={e=>setQcItem(i=>({...i,kvaRating:e.target.value}))}/></div>
+            </div>
+            <div>
+              <label style={lbl}>Poles <span style={{fontWeight:600,color:"#94a3b8"}}>(drives the SKU when catalog is blank)</span></label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6}}>
+                {["1","2","3","4"].map(pn=><button key={pn} onClick={()=>setQcItem(i=>({...i,poles:i.poles===pn?"":pn}))} style={{padding:"12px 0",borderRadius:10,border:`2px solid ${qcItem.poles===pn?"#0891b2":"#e2e8f0"}`,background:qcItem.poles===pn?"#0891b215":"#fff",color:qcItem.poles===pn?"#0891b2":"#94a3b8",fontWeight:800,fontSize:15,cursor:"pointer"}}>{pn}P</button>)}
+              </div>
             </div>
           </div>
 
@@ -2289,6 +2547,90 @@ ${header}
         </div>}
       </div>}
 
+      {/* === Q-mode: CYCLE COUNT === */}
+      {view==="new"&&mode==="quick"&&qcSub==="cycle_count"&&<div>
+        <div style={card}>
+          <div style={{fontSize:16,fontWeight:800,marginBottom:6}}>Cycle Count . {currentFacility}</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Pick a location. The app lists what is supposed to be there. Walk the shelf and mark each item.</div>
+          <label style={lbl}>Location code{locLoading?" . loading":` . ${facLocs.length} codes`}</label>
+          <div style={{marginBottom:10}}><LocationPicker locations={facLocs} value={ccLoc} onChange={setCcLoc} accent="#0891b2" placeholder="e.g. MWH-A-1-1"/></div>
+          <button onClick={()=>loadCycleCount(ccLoc)} disabled={ccLoading||!ccLoc.trim()} style={{width:"100%",padding:14,borderRadius:10,border:"none",background:ccLoading||!ccLoc.trim()?"#94a3b8":"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:14,fontWeight:800,cursor:ccLoading||!ccLoc.trim()?"not-allowed":"pointer"}}>{ccLoading?"Loading...":"Load shelf"}</button>
+        </div>
+        {ccItems.length>0&&<div style={{...card}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{fontSize:13,fontWeight:800}}>{ccItems.length} item{ccItems.length===1?"":"s"} at {ccLoc.toUpperCase()}</div>
+            <div style={{fontSize:11,color:"#64748b"}}>{Object.values(ccStatus).filter(s=>s==="verified").length} ok . {Object.values(ccStatus).filter(s=>s==="discrepant").length} flagged</div>
+          </div>
+          {ccItems.map(it=>{const st=ccStatus[it.id];return <div key={it.id} style={{borderLeft:`4px solid ${st==="verified"?"#16a34a":st==="discrepant"?"#dc2626":"#cbd5e1"}`,padding:"8px 10px",marginBottom:8,background:"#f8fafc",borderRadius:8}}>
+            <div style={{fontSize:13,fontWeight:800}}>{it.equipment_type||"(no type)"} <span style={{fontSize:10,color:"#94a3b8",fontWeight:600}}>{it.id}</span></div>
+            <div style={{fontSize:11,color:"#64748b",marginBottom:6}}>{[it.manufacturer,it.model_number].filter(Boolean).join(" / ")||"-"} . S/N: {it.serial_number||"UNKNOWN"} . Gr {it.grade||"-"}</div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>markCycle(it,"verified")} style={{flex:1,padding:"8px 0",borderRadius:7,border:`1.5px solid #16a34a`,background:st==="verified"?"#16a34a":"#fff",color:st==="verified"?"#fff":"#16a34a",fontSize:12,fontWeight:800,cursor:"pointer"}}>Verified</button>
+              <button onClick={()=>markCycle(it,"discrepant")} style={{flex:1,padding:"8px 0",borderRadius:7,border:`1.5px solid #dc2626`,background:st==="discrepant"?"#dc2626":"#fff",color:st==="discrepant"?"#fff":"#dc2626",fontSize:12,fontWeight:800,cursor:"pointer"}}>Discrepant</button>
+            </div>
+          </div>;})}
+        </div>}
+      </div>}
+
+      {/* === Q-mode: LOCATION VERIFY === */}
+      {view==="new"&&mode==="quick"&&qcSub==="location_verify"&&<div>
+        <div style={card}>
+          <div style={{fontSize:16,fontWeight:800,marginBottom:6}}>Location Verify</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Scan or type a serial. The app shows where the system thinks it is. Confirm or correct.</div>
+          <ScanInput label="Serial number" value={lvSerial} onChange={setLvSerial} placeholder="Scan or type S/N..."/>
+          <button onClick={()=>lookupVerify(lvSerial)} disabled={lvLoading||!lvSerial.trim()} style={{width:"100%",marginTop:10,padding:14,borderRadius:10,border:"none",background:lvLoading||!lvSerial.trim()?"#94a3b8":"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:14,fontWeight:800,cursor:lvLoading||!lvSerial.trim()?"not-allowed":"pointer"}}>{lvLoading?"Looking up...":"Look up item"}</button>
+        </div>
+        {lvItem&&<div style={card}>
+          <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>{lvItem.equipment_type||"(no type)"} <span style={{fontSize:10,color:"#94a3b8",fontWeight:600}}>{lvItem.id}</span></div>
+          <div style={{fontSize:12,color:"#64748b"}}>{[lvItem.manufacturer,lvItem.model_number].filter(Boolean).join(" / ")||"-"} . S/N: {lvItem.serial_number||"UNKNOWN"}</div>
+          <div style={{padding:"10px 12px",background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:8,margin:"12px 0"}}>
+            <div style={{fontSize:11,color:"#0369a1",fontWeight:700,letterSpacing:0.5}}>STORED LOCATION</div>
+            <div style={{fontSize:18,fontWeight:800,color:"#0c4a6e"}}>{lvItem.location_detail||"(none)"}</div>
+            <div style={{fontSize:11,color:"#0369a1"}}>State: {lvItem.physical_state||"-"}</div>
+          </div>
+          <button onClick={confirmVerifyLoc} style={{width:"100%",padding:14,borderRadius:10,border:"none",background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",marginBottom:12}}>Location is correct</button>
+          <label style={lbl}>Wrong? Pick the correct location ({currentFacility})</label>
+          <div style={{marginBottom:10}}><LocationPicker locations={facLocs} value={lvNewLoc} onChange={setLvNewLoc} accent="#0891b2" placeholder="Correct code..."/></div>
+          <button onClick={correctVerifyLoc} disabled={!lvNewLoc.trim()||lvNewLoc.trim().toUpperCase()===(lvItem.location_detail||"").toUpperCase()} style={{width:"100%",padding:12,borderRadius:10,border:`2px solid #0891b2`,background:"#fff",color:"#0891b2",fontSize:13,fontWeight:800,cursor:"pointer",opacity:!lvNewLoc.trim()||lvNewLoc.trim().toUpperCase()===(lvItem.location_detail||"").toUpperCase()?0.5:1}}>Correct location</button>
+        </div>}
+      </div>}
+
+      {/* === PICK MODE === */}
+      {view==="new"&&mode==="pick"&&<div>
+        <div style={{...card,background:`linear-gradient(135deg,${MODE_COLOR.pick},#5b21b6)`,color:"#fff"}}>
+          <div style={{fontSize:11,opacity:0.85,fontWeight:700,letterSpacing:1}}>PICK & MOVE . FROM {currentFacility}</div>
+          <div style={{fontSize:20,fontWeight:800,marginTop:4}}>{pickSet.size} selected</div>
+        </div>
+        <div style={card}>
+          <input style={inp} value={pickSearch} onChange={e=>setPickSearch(e.target.value)} placeholder="Search S/N, model, mfr, type, location..."/>
+          {invLoading&&<div style={{fontSize:12,color:"#94a3b8",marginTop:8}}>Loading inventory...</div>}
+        </div>
+        {(()=>{
+          const q=pickSearch.trim().toLowerCase();
+          let list=inv;
+          if(q)list=list.filter(r=>[r.serial_number,r.model_number,r.catalog_number,r.manufacturer,r.equipment_type,r.location_detail,r.id].some(v=>v&&String(v).toLowerCase().includes(q)));
+          list=list.slice(0,200);
+          if(list.length===0)return <div style={{...card,textAlign:"center",color:"#94a3b8",padding:30}}>No matches.</div>;
+          return <div style={card}>
+            {list.map(r=>{const on=pickSet.has(r.id);return <label key={r.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 4px",borderBottom:"1px solid #f1f5f9",cursor:"pointer"}}>
+              <input type="checkbox" checked={on} onChange={()=>setPickSet(prev=>{const n=new Set(prev);on?n.delete(r.id):n.add(r.id);return n;})} style={{width:20,height:20,accentColor:MODE_COLOR.pick,flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:800}}>{r.equipment_type||"(no type)"} <span style={{fontSize:10,color:"#94a3b8",fontWeight:600}}>{r.id}</span></div>
+                <div style={{fontSize:11,color:"#64748b"}}>{[r.manufacturer,r.model_number].filter(Boolean).join(" / ")||"-"} . S/N: {r.serial_number||"UNKNOWN"}</div>
+                <div style={{fontSize:10,color:"#94a3b8"}}>{r.physical_state||"-"}{r.location_detail?` . ${r.location_detail}`:""}</div>
+              </div>
+            </label>;})}
+          </div>;
+        })()}
+        {pickSet.size>0&&<div style={card}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{fontSize:13,fontWeight:800,color:MODE_COLOR.pick}}>Move {pickSet.size} item{pickSet.size===1?"":"s"}</div>
+            <button onClick={()=>setPickSet(new Set())} style={{padding:"6px 10px",borderRadius:7,border:"1px solid #cbd5e1",background:"#fff",color:"#64748b",fontSize:11,fontWeight:700,cursor:"pointer"}}>Clear</button>
+          </div>
+          <MovePanel facility={currentFacility} count={pickSet.size} busy={pickBusy} onPick={async(t)=>{setPickBusy(true);await applyMoveToSet(t,pickSet,()=>setPickSet(new Set()));setPickBusy(false);}}/>
+        </div>}
+      </div>}
+
       {view==="jobs"&&<div>
         {ld?<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading...</div>:
         jobs.length===0?<div style={{...card,textAlign:"center",color:"#94a3b8",padding:40}}>No jobs yet. Tap + to start.</div>:
@@ -2330,6 +2672,10 @@ ${header}
       </div>}
 
       {view==="inventory"&&<div>
+        <div style={{display:"flex",gap:6,marginBottom:10}}>
+          {[{k:"items",l:"Items"},{k:"onhand",l:"On Hand"}].map(t=><button key={t.k} onClick={()=>{setOhTab(t.k);if(t.k==="onhand")loadOnHand();}} style={{flex:1,padding:"10px 0",borderRadius:9,border:`2px solid ${ohTab===t.k?"#3d5e3f":"#e2e8f0"}`,background:ohTab===t.k?"#3d5e3f":"#fff",color:ohTab===t.k?"#fff":"#64748b",fontWeight:800,fontSize:12,cursor:"pointer"}}>{t.l}</button>)}
+        </div>
+        {ohTab==="items"&&<>
         <div style={card}>
           <div style={{fontSize:14,fontWeight:800,marginBottom:10}}>Inventory ({inv.length})</div>
           <input style={inp} value={invSearch} onChange={e=>setInvSearch(e.target.value)} placeholder="Search S/N, model, mfr, location..."/>
@@ -2339,6 +2685,16 @@ ${header}
             <select style={{...inpSm,flex:1}} value={invFilterLoc} onChange={e=>setInvFilterLoc(e.target.value)}><option value="">All locations</option>{LOC.map(l=><option key={l.v} value={l.v}>{l.l}</option>)}</select>
           </div>
         </div>
+        {invSel.size>0&&<div style={{...card,borderLeft:`4px solid ${MODE_COLOR.pick}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:invMoveOpen?12:0}}>
+            <div style={{fontSize:13,fontWeight:800,color:MODE_COLOR.pick}}>{invSel.size} selected . from {currentFacility}</div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>setInvMoveOpen(o=>!o)} style={{padding:"8px 12px",borderRadius:8,border:"none",background:MODE_COLOR.pick,color:"#fff",fontSize:12,fontWeight:800,cursor:"pointer"}}>{invMoveOpen?"Hide":`Move ${invSel.size}`}</button>
+              <button onClick={()=>{setInvSel(new Set());setInvMoveOpen(false);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #cbd5e1",background:"#fff",color:"#64748b",fontSize:12,fontWeight:700,cursor:"pointer"}}>Clear</button>
+            </div>
+          </div>
+          {invMoveOpen&&<MovePanel facility={currentFacility} count={invSel.size} busy={invMoveBusy} onPick={async(t)=>{setInvMoveBusy(true);await applyMoveToSet(t,invSel,()=>{setInvSel(new Set());setInvMoveOpen(false);});setInvMoveBusy(false);}}/>}
+        </div>}
         {invLoading?<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading inventory...</div>:
         (()=>{
           let filtered=inv;
@@ -2348,7 +2704,10 @@ ${header}
           if(invFilterLoc)filtered=filtered.filter(r=>r.location===invFilterLoc);
           if(filtered.length===0)return <div style={{...card,textAlign:"center",color:"#94a3b8",padding:40}}>No matches.</div>;
           return filtered.map(r=>(
-            <div key={r.id} style={{...card,borderLeft:`4px solid ${gc[r.grade]||"#6b7280"}`,padding:12}}>
+            <div key={r.id} style={{...card,borderLeft:`4px solid ${gc[r.grade]||"#6b7280"}`,padding:12,...(invSel.has(r.id)?{outline:`2px solid ${MODE_COLOR.pick}`}:{})}}>
+              <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                <input type="checkbox" checked={invSel.has(r.id)} onChange={()=>setInvSel(prev=>{const n=new Set(prev);n.has(r.id)?n.delete(r.id):n.add(r.id);return n;})} style={{width:20,height:20,accentColor:MODE_COLOR.pick,marginTop:2,flexShrink:0,cursor:"pointer"}}/>
+                <div style={{flex:1,minWidth:0}}>
               <div onClick={()=>setInvExpId(invExpId===r.id?null:r.id)} style={{cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{fontSize:13,fontWeight:800}}>{r.id}</div>
@@ -2371,15 +2730,60 @@ ${header}
                 {r.bus_rating&&<div><strong>Bus:</strong> {r.bus_rating}A {r.voltage_class||""}</div>}
                 {r.condition_notes&&<div style={{marginTop:4}}><strong>Notes:</strong> {r.condition_notes}</div>}
                 <div style={{display:"flex",gap:6,marginTop:10}}>
+                  {r.tracking_mode==="quantity"&&(parseInt(r.qty)||1)>1&&<button onClick={(e)=>{e.stopPropagation();setSplitModal(r);setSplitQty(1);}} style={{flex:1,padding:"10px 0",borderRadius:8,border:`1.5px solid ${MODE_COLOR.pick}`,background:"#fff",color:MODE_COLOR.pick,fontSize:12,fontWeight:700,cursor:"pointer"}}>Split & Move</button>}
                   <button onClick={(e)=>{e.stopPropagation();openEditInv(r);}} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #2563eb",background:"#fff",color:"#2563eb",fontSize:12,fontWeight:700,cursor:"pointer"}}>Edit</button>
                   <button onClick={(e)=>{e.stopPropagation();startDeleteInv(r);}} disabled={deleteChecking} style={{flex:1,padding:"10px 0",borderRadius:8,border:"1.5px solid #dc2626",background:"#fff",color:"#dc2626",fontSize:12,fontWeight:700,cursor:deleteChecking?"wait":"pointer"}}>{deleteChecking?"Checking...":"Delete"}</button>
                 </div>
                 {(()=>{const cs=r.comp_snapshots&&r.comp_snapshots[0];return cs&&cs.recommended_price!=null?(<div style={{marginTop:8,padding:"8px 12px",borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,color:"#64748b",fontWeight:600}}>Comp at intake{cs.created_at?` . ${String(cs.created_at).slice(0,10)}`:""}{(cs.ebay_count||cs.web_count)?` . ${cs.ebay_count||0} eBay / ${cs.web_count||0} dealer`:""}</span><span style={{fontSize:14,fontWeight:800,color:"#059669",fontFamily:"monospace"}}>${Number(cs.recommended_price).toLocaleString()}</span></div>):null;})()}
                 <CompPanel item={r} />
               </div>}
+                </div>
+              </div>
             </div>
           ));
         })()}
+        </>}
+        {ohTab==="onhand"&&<>
+          <div style={card}>
+            <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>On Hand by Product</div>
+            <input style={inp} value={ohSearch} onChange={e=>setOhSearch(e.target.value)} placeholder="Search mfr, catalog, type, amps..."/>
+            <div style={{fontSize:11,color:"#94a3b8",marginTop:8}}>Grouped by catalog, or by mfr+amps+poles+type when catalog is blank. Split by grade and location. Breakers still inside a parent are not counted.</div>
+          </div>
+          {ohLoading?<div style={{textAlign:"center",padding:40,color:"#94a3b8"}}>Loading on-hand...</div>:
+          (()=>{
+            const q=ohSearch.trim().toLowerCase();
+            let rows=ohRows;
+            if(q)rows=rows.filter(r=>[r.sku,r.manufacturer,r.equipment_type,r.catalog_number,r.amperage_rating,r.poles].some(v=>v&&String(v).toLowerCase().includes(q)));
+            if(rows.length===0)return <div style={{...card,textAlign:"center",color:"#94a3b8",padding:40}}>Nothing on hand{ohRows.length?" for that search":""}.</div>;
+            const groups={};rows.forEach(r=>{(groups[r.sku]=groups[r.sku]||[]).push(r);});
+            const order=Object.keys(groups).sort((a,b)=>groups[b].reduce((s,r)=>s+(Number(r.on_hand)||0),0)-groups[a].reduce((s,r)=>s+(Number(r.on_hand)||0),0));
+            return order.map(sku=>{
+              const lines=groups[sku];
+              const total=lines.reduce((s,r)=>s+(Number(r.on_hand)||0),0);
+              const h=lines[0];
+              const title=[h.manufacturer,h.equipment_type].filter(Boolean).join(" ");
+              const spec=[h.catalog_number?`Cat ${h.catalog_number}`:null,h.amperage_rating?`${String(h.amperage_rating).replace(/[^0-9]/g,"")}A`:null,h.poles?`${h.poles}P`:null].filter(Boolean).join(" . ");
+              return <div key={sku} style={{...card,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:14,fontWeight:800}}>{title||"(unspecified)"}</div>
+                    <div style={{fontSize:11,color:"#64748b"}}>{spec||sku}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}><div style={{fontSize:22,fontWeight:800,color:"#3d5e3f",fontFamily:"monospace"}}>{total}</div><div style={{fontSize:9,color:"#94a3b8",fontWeight:700}}>ON HAND</div></div>
+                </div>
+                <div style={{marginTop:8,borderTop:"1px solid #f1f5f9",paddingTop:8,display:"flex",flexDirection:"column",gap:4}}>
+                  {lines.slice().sort((a,b)=>(a.grade||"").localeCompare(b.grade||"")||String(a.location_detail||"").localeCompare(String(b.location_detail||""))).map((r,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(gc[r.grade]||"#6b7280")+"18",color:gc[r.grade]||"#6b7280",fontWeight:800}}>{r.grade||"?"}</span>
+                      <span style={{color:"#475569"}}>{r.location_detail||"(no location)"}</span>
+                    </div>
+                    <span style={{fontWeight:800,fontFamily:"monospace",color:"#1e293b"}}>{r.on_hand}</span>
+                  </div>)}
+                </div>
+              </div>;
+            });
+          })()}
+        </>}
       </div>}
 
       {recvModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -2519,6 +2923,24 @@ ${header}
           </div>
         </div>;
       })()}
+
+      {splitModal&&(()=>{const total=parseInt(splitModal.qty)||1;return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+        <div style={{background:"#fff",borderRadius:14,padding:20,maxWidth:440,width:"100%",maxHeight:"92vh",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+            <div style={{fontSize:15,fontWeight:800}}>Split & Move</div>
+            <button onClick={()=>{setSplitModal(null);setSplitQty(1);}} style={{padding:"4px 10px",borderRadius:7,border:"1px solid #cbd5e1",background:"#fff",color:"#64748b",fontSize:12,fontWeight:700,cursor:"pointer"}}>Cancel</button>
+          </div>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>{splitModal.equipment_type||"(no type)"}{splitModal.manufacturer?` . ${splitModal.manufacturer}`:""} . {total} on hand at {splitModal.location_detail||"origin"}</div>
+          <label style={lbl}>Quantity to move (1 to {total-1})</label>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+            <button onClick={()=>setSplitQty(q=>Math.max(1,(parseInt(q)||1)-1))} style={{width:52,height:52,borderRadius:12,border:`2px solid ${MODE_COLOR.pick}`,background:"#fff",color:MODE_COLOR.pick,fontSize:24,fontWeight:800,cursor:"pointer"}}>-</button>
+            <input type="number" inputMode="numeric" min="1" max={total-1} value={splitQty} onFocus={e=>e.target.select()} onChange={e=>{const v=parseInt(e.target.value)||1;setSplitQty(Math.min(total-1,Math.max(1,v)));}} style={{flex:1,minWidth:0,boxSizing:"border-box",WebkitAppearance:"none",MozAppearance:"textfield",padding:"14px 0",textAlign:"center",border:`2px solid ${MODE_COLOR.pick}`,borderRadius:12,fontSize:28,fontWeight:800,color:MODE_COLOR.pick}}/>
+            <button onClick={()=>setSplitQty(q=>Math.min(total-1,(parseInt(q)||1)+1))} style={{width:52,height:52,borderRadius:12,border:`2px solid ${MODE_COLOR.pick}`,background:MODE_COLOR.pick,color:"#fff",fontSize:24,fontWeight:800,cursor:"pointer"}}>+</button>
+          </div>
+          <div style={{fontSize:11,color:"#94a3b8",marginBottom:14}}>{total-splitQty} will stay at {splitModal.location_detail||"origin"}. {splitQty} spawns a new lot at the destination, tagged back to this lot.</div>
+          <MovePanel facility={currentFacility} count={splitQty} busy={splitBusy} onPick={(t)=>splitMove(splitModal,splitQty,t)}/>
+        </div>
+      </div>;})()}
 
       {helpOpen&&<div onClick={()=>setHelpOpen(false)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.55)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
         <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:14,maxWidth:920,width:"100%",maxHeight:"90vh",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 20px 50px rgba(0,0,0,0.3)"}}>
