@@ -941,6 +941,45 @@ ${header}
   */
   const [bulkBusy,setBulkBusy]=useState(null); // {step,progress,total} or null
   const [bulkDragOver,setBulkDragOver]=useState(false);
+  /* === HELP / SOP CONTENT (DB-driven via public.app_help_docs) === */
+  const [helpOpen,setHelpOpen]=useState(false);
+  const [helpDocs,setHelpDocs]=useState([]);
+  const [helpLoading,setHelpLoading]=useState(false);
+  const [helpActive,setHelpActive]=useState(null); // section_key
+  const loadHelpDocs=useCallback(async()=>{
+    if(helpDocs.length>0)return; // cache for the session
+    setHelpLoading(true);
+    try{
+      const rows=await dbF("app_help_docs?select=section_key,section_order,title,body_md&app_name=eq.powergate&order=section_order.asc");
+      setHelpDocs(rows||[]);
+      if(rows&&rows.length>0&&!helpActive)setHelpActive(rows[0].section_key);
+    }catch(e){setMsg({t:"error",m:"Help load failed: "+e.message});}
+    setHelpLoading(false);
+  },[helpDocs.length,helpActive]);
+  // Tiny safe markdown -> HTML renderer (headers, bold, lists, paragraphs).
+  // Keeps content safe by escaping HTML before applying inline markdown.
+  const renderHelpMd=(md)=>{
+    const esc=(s)=>s.replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+    const lines=esc(md||"").split("\n");
+    let html="";
+    let inList=false;
+    for(const raw of lines){
+      const ln=raw.trimEnd();
+      if(/^\s*-\s+/.test(ln)){
+        if(!inList){html+="<ul style=\"margin:4px 0 8px 18px;padding:0\">";inList=true;}
+        html+=`<li style="margin-bottom:3px">${ln.replace(/^\s*-\s+/,"")}</li>`;
+        continue;
+      }
+      if(inList){html+="</ul>";inList=false;}
+      if(ln==="")html+="<div style=\"height:8px\"></div>";
+      else if(/^\d+\.\s+/.test(ln))html+=`<div style="margin:2px 0 2px 14px">${ln}</div>`;
+      else html+=`<div style="margin:4px 0">${ln}</div>`;
+    }
+    if(inList)html+="</ul>";
+    // inline bold **text**
+    html=html.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+    return html;
+  };
   const handleWalkthroughBulkIntake=async(fileList)=>{
     // Diagnostic: log what the picker actually returned
     const rawCount=fileList?fileList.length:0;
@@ -1133,11 +1172,36 @@ ${header}
         if(wt)u.estimatedWeight=parseFloat(wt.estimated_weight_lbs)||0;
         return u;
       });
-      setItems(prev=>[...prev,...enriched]);
+      // Post-AI sanity check: flag rows that look like garbage so they do not pollute the bid.
+      // Flagged rows still get added (no data lost) but they show a warning badge and excluded from totals.
+      const flagReasons=(r)=>{
+        const reasons=[];
+        const amp=parseFloat(r.amperageRating)||0;
+        const kva=parseFloat(r.kvaRating)||0;
+        const type=(r.equipmentType||"").toLowerCase();
+        // unrealistic amperage (no real switchgear exceeds ~6000A; large bus duct tops out around 5000A)
+        if(amp>6000)reasons.push(`Amperage ${amp}A unrealistic (likely serial misread)`);
+        // amperage with too many digits is almost always a serial number
+        if(r.amperageRating&&String(r.amperageRating).length>=6)reasons.push("Amperage field looks like a serial number");
+        // unrealistic KVA
+        if(kva>5000)reasons.push(`KVA ${kva} unrealistic`);
+        // generic "Other" type with nothing identifying it
+        if((type==="other"||type==="")&&!r.modelNumber&&!r.manufacturer)reasons.push("Equipment type not identified");
+        // blank type AND blank manufacturer AND blank model AND blank amperage = nothing useful
+        if(!type&&!r.manufacturer&&!r.modelNumber&&!r.amperageRating)reasons.push("No identifying info extracted");
+        return reasons;
+      };
+      const validated=enriched.map(r=>{
+        const reasons=flagReasons(r);
+        return reasons.length>0?{...r,_review:true,_reviewReasons:reasons}:r;
+      });
+      const flaggedCount=validated.filter(r=>r._review).length;
+      setItems(prev=>[...prev,...validated]);
       const totalBreakers=breakers.length;
+      const cleanCount=validated.length-flaggedCount;
       const baseSummary=totalBreakers>0
-        ?`${enriched.length} row${enriched.length===1?"":"s"} added (${totalBreakers} breakers grouped into ${groupedBreakerRows.length} type${groupedBreakerRows.length===1?"":"s"}${parents.length===0?", panel synthesized":""})`
-        :`${enriched.length} item${enriched.length===1?"":"s"} added`;
+        ?`${cleanCount} clean row${cleanCount===1?"":"s"} added${flaggedCount>0?`, ${flaggedCount} flagged for review`:""} (${totalBreakers} breakers grouped into ${groupedBreakerRows.length} type${groupedBreakerRows.length===1?"":"s"}${parents.length===0?", panel synthesized":""})`
+        :`${cleanCount} item${cleanCount===1?"":"s"} added${flaggedCount>0?`, ${flaggedCount} flagged for review`:""}`;
       // Surface partial failures, if any. Upload errors first, then AI batch errors.
       const failParts=[];
       if(errors.length>0){
@@ -1177,7 +1241,7 @@ ${header}
   const rmItem=i=>setItems(p=>p.filter((_,j)=>j!==i));
   const uItem=(i,f,v)=>{
     setItems(p=>{
-      const u=p.map((it,j)=>j===i?{...it,[f]:v}:it);
+      const u=p.map((it,j)=>j===i?{...it,[f]:v,_review:false,_reviewReasons:undefined}:it);
       const item=u[i];
       if(["equipmentType","grade","amperageRating","disposition"].includes(f)){
         const pb=lookupPrice(item.equipmentType,item.grade,item.amperageRating);
@@ -1226,8 +1290,8 @@ ${header}
   const laborCost=(parseFloat(job.laborHours)||0)*(parseFloat(job.laborRate)||0);
   const transportCost=parseFloat(job.transportCost)||0;
   const totalCOGS=laborCost+transportCost;
-  const totalResale=items.filter(i=>i.disposition!=="scrap").reduce((a,i)=>a+(parseFloat(i.estimatedResale)||0)*i.quantity,0);
-  const totalScrap=items.filter(i=>i.disposition==="scrap").reduce((a,i)=>a+(i.estimatedScrap||0)*i.quantity,0);
+  const totalResale=items.filter(i=>i.disposition!=="scrap"&&!i._review).reduce((a,i)=>a+(parseFloat(i.estimatedResale)||0)*i.quantity,0);
+  const totalScrap=items.filter(i=>i.disposition==="scrap"&&!i._review).reduce((a,i)=>a+(i.estimatedScrap||0)*i.quantity,0);
   const totalRevenue=totalResale+totalScrap;
   const grossProfit=totalRevenue-totalCOGS;
   const marginPct=totalRevenue>0?(grossProfit/totalRevenue*100):0;
@@ -1605,7 +1669,8 @@ ${header}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,padding:"12px 0",borderBottom:"3px solid #58815a"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}><LogoMark size={28} /><div><div style={{fontSize:16,fontWeight:800,color:"#565756",letterSpacing:2}}>HARDIN</div><div style={{fontSize:9,color:"#58815a",fontWeight:700,letterSpacing:1.5}}>POWERGATE</div></div></div>
         <div style={{display:"flex",gap:4}}>
-          {[{k:"new",l:"+"},{k:"jobs",l:String(jobs.length)},{k:"inventory",l:"[R] "}].map(t=><button key={t.k} onClick={()=>{setView(t.k);if(t.k==="inventory")loadInventory();}} style={{padding:"8px 14px",borderRadius:8,border:"none",background:view===t.k?"#3d5e3f":"#e2e8f0",color:view===t.k?"#fff":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>{t.l}</button>)}
+          {[{k:"new",l:"+"},{k:"jobs",l:"Jobs"},{k:"inventory",l:"Inv"}].map(t=><button key={t.k} onClick={()=>{setView(t.k);if(t.k==="inventory")loadInventory();}} style={{padding:"8px 14px",borderRadius:8,border:"none",background:view===t.k?"#3d5e3f":"#e2e8f0",color:view===t.k?"#fff":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>{t.l}</button>)}
+          <button onClick={()=>{setHelpOpen(true);loadHelpDocs();}} title="Help" style={{padding:"8px 12px",borderRadius:8,border:"none",background:"#e2e8f0",color:"#64748b",fontWeight:800,fontSize:13,cursor:"pointer"}}>?</button>
         </div>
       </div>
 
@@ -1695,15 +1760,17 @@ ${header}
         {errs.items&&<div style={{fontSize:12,color:"#ef4444",marginBottom:8}}>{errs.items}</div>}
 
         {items.map((it,i)=>(
-          <div key={i} style={{...card,borderLeft:`4px solid ${gc[it.grade]||"#6b7280"}`,padding:14}}>
+          <div key={i} style={{...card,borderLeft:`4px solid ${it._review?"#f59e0b":(gc[it.grade]||"#6b7280")}`,padding:14,background:it._review?"#fffbeb":card.background}}>
             <div onClick={()=>toggleItem(i)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",marginBottom:expandedItems[i]?10:0}}>
               <div style={{flex:1}}>
-                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontSize:14,fontWeight:800,color:"#475569"}}>{expandedItems[i]?"v":">"} ITEM {i+1}</span>
+                  {it._review&&<span title={(it._reviewReasons||[]).join(". ")} style={{padding:"2px 8px",borderRadius:6,background:"#fef3c7",color:"#92400e",fontSize:10,fontWeight:800,border:"1px solid #fcd34d"}}>NEEDS REVIEW</span>}
                   {it.grade&&<span style={{padding:"2px 8px",borderRadius:6,background:(gc[it.grade]||"#6b7280")+"18",color:gc[it.grade],fontSize:10,fontWeight:800}}>{it.grade}</span>}
                   {it.disposition&&it.disposition!=="unassigned"&&<span style={{padding:"2px 6px",borderRadius:6,background:(dc[it.disposition]||"#6b7280")+"15",color:dc[it.disposition],fontSize:9,fontWeight:700}}>{it.disposition}</span>}
                 </div>
                 {!expandedItems[i]&&<div style={{fontSize:11,color:"#64748b",marginTop:2}}>{it.equipmentType||"No type"}{it.manufacturer?` . ${it.manufacturer}`:""}{it.kvaRating?` . ${it.kvaRating}KVA`:""}{it.amperageRating?` . ${it.amperageRating}A`:""}{it.voltageRating?` . ${it.voltageRating}V`:""}{it.serialNumber?` . S/N:${it.serialNumber}`:(it.quantity||1)>1?` . Qty:${it.quantity}`:""}{parseFloat(it.estimatedResale)>0?` . $${parseFloat(it.estimatedResale).toFixed(0)}`:""}{(it.photos||[]).length>0?` . [CAM] ${(it.photos||[]).length}`:""}</div>}
+                {!expandedItems[i]&&it._review&&<div style={{fontSize:10,color:"#92400e",marginTop:3,fontStyle:"italic"}}>{(it._reviewReasons||[]).join(". ")}</div>}
               </div>
               <button onClick={e=>{e.stopPropagation();rmItem(i);}} style={{background:"none",border:"none",color:"#ef4444",fontSize:20,cursor:"pointer"}}>&times;</button>
             </div>
@@ -2452,6 +2519,30 @@ ${header}
           </div>
         </div>;
       })()}
+
+      {helpOpen&&<div onClick={()=>setHelpOpen(false)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.55)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+        <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:14,maxWidth:920,width:"100%",maxHeight:"90vh",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 20px 50px rgba(0,0,0,0.3)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 18px",borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}>
+            <div style={{fontSize:16,fontWeight:800,color:"#3d5e3f"}}>PowerGate Help</div>
+            <button onClick={()=>setHelpOpen(false)} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #cbd5e1",background:"#fff",color:"#475569",fontSize:12,fontWeight:700,cursor:"pointer"}}>Close</button>
+          </div>
+          <div style={{display:"flex",flex:1,minHeight:0}}>
+            <div style={{width:220,borderRight:"1px solid #e2e8f0",background:"#fafbfc",overflowY:"auto",padding:8}}>
+              {helpLoading&&<div style={{padding:10,fontSize:12,color:"#64748b"}}>Loading...</div>}
+              {!helpLoading&&helpDocs.length===0&&<div style={{padding:10,fontSize:12,color:"#64748b"}}>No help content available.</div>}
+              {helpDocs.map(d=><button key={d.section_key} onClick={()=>setHelpActive(d.section_key)} style={{display:"block",width:"100%",textAlign:"left",padding:"9px 11px",borderRadius:7,border:"none",background:helpActive===d.section_key?"#3d5e3f":"transparent",color:helpActive===d.section_key?"#fff":"#475569",fontSize:12,fontWeight:helpActive===d.section_key?800:600,cursor:"pointer",marginBottom:3}}>{d.title}</button>)}
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"18px 22px"}}>
+              {(()=>{const d=helpDocs.find(x=>x.section_key===helpActive);if(!d)return <div style={{color:"#94a3b8",fontSize:13}}>Pick a topic on the left.</div>;
+                return <div>
+                  <div style={{fontSize:18,fontWeight:800,color:"#3d5e3f",marginBottom:10}}>{d.title}</div>
+                  <div style={{fontSize:13,color:"#334155",lineHeight:1.55}} dangerouslySetInnerHTML={{__html:renderHelpMd(d.body_md)}}/>
+                </div>;
+              })()}
+            </div>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }
