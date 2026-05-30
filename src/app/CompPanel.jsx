@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const SB = "https://ulyycjtrshpsjpvbztkr.supabase.co";
 const FN = (n) => `${SB}/functions/v1/${n}`;
@@ -15,6 +15,24 @@ export function buildQuery(item) {
   const mod = item.modelNumber || item.model_number || "";
   if (cat) p.push(cat);
   else if (mod) p.push(mod);
+  const amps = item.amperageRating || item.amperage_rating || "";
+  const kva = item.kvaRating || item.kva_rating || "";
+  if (amps) p.push(amps + "A");
+  else if (kva) p.push(kva + "KVA");
+  const v = String(item.voltageRating || item.voltage_rating || "").replace(/[^0-9]/g, "");
+  if (v) p.push(v + "V");
+  return p.filter(Boolean).join(" ");
+}
+
+/* Broad fallback query: manufacturer + type + amps/kva + volts, no catalog.
+   Used when the catalog-specific query returns nothing (often a misread catalog). */
+export function buildBroadQuery(item) {
+  if (!item) return "";
+  const p = [];
+  const mfr = item.manufacturer || "";
+  if (mfr) p.push(String(mfr).split(" / ")[0].split("(")[0].trim());
+  const eq = item.equipmentType || item.equipment_type || "";
+  if (eq) p.push(String(eq).replace(/ *\(.*\)/, "").trim());
   const amps = item.amperageRating || item.amperage_rating || "";
   const kva = item.kvaRating || item.kva_rating || "";
   if (amps) p.push(amps + "A");
@@ -52,7 +70,7 @@ function CompItem({ comp, source }) {
   );
 }
 
-export default function CompPanel({ item }) {
+export default function CompPanel({ item, onRecommend }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("ebay");
   const [ebay, setEbay] = useState(null);
@@ -62,31 +80,38 @@ export default function CompPanel({ item }) {
   const [fetched, setFetched] = useState(false);
 
   const query = buildQuery(item);
+  const broadQuery = buildBroadQuery(item);
   const hasData = query.split(" ").length >= 2;
 
   const fetchEbay = useCallback(async () => {
     if (!query) return;
     setLoading(p => ({ ...p, ebay: true }));
     try {
-      const r = await fetch(FN("ebay-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
-      const d = await r.json();
+      let d = await (await fetch(FN("ebay-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) })).json();
+      if ((!d.comps || d.comps.length === 0) && broadQuery && broadQuery !== query) {
+        const d2 = await (await fetch(FN("ebay-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: broadQuery }) })).json();
+        if (d2.comps && d2.comps.length > 0) { d = { ...d2, _broad: true }; }
+      }
       if (d.error) setErrors(p => ({ ...p, ebay: d.error }));
       setEbay(d);
     } catch (e) { setErrors(p => ({ ...p, ebay: String(e) })); }
     setLoading(p => ({ ...p, ebay: false }));
-  }, [query]);
+  }, [query, broadQuery]);
 
   const fetchWeb = useCallback(async () => {
     if (!query) return;
     setLoading(p => ({ ...p, web: true }));
     try {
-      const r = await fetch(FN("web-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, num: 10 }) });
-      const d = await r.json();
+      let d = await (await fetch(FN("web-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, num: 10 }) })).json();
+      if ((!d.comps || d.comps.length === 0) && broadQuery && broadQuery !== query) {
+        const d2 = await (await fetch(FN("web-comps"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: broadQuery, num: 10 }) })).json();
+        if (d2.comps && d2.comps.length > 0) { d = { ...d2, _broad: true }; }
+      }
       if (d.error) setErrors(p => ({ ...p, web: d.error }));
       setWeb(d);
     } catch (e) { setErrors(p => ({ ...p, web: String(e) })); }
     setLoading(p => ({ ...p, web: false }));
-  }, [query]);
+  }, [query, broadQuery]);
 
   const fetchAll = useCallback(() => {
     if (!hasData) return;
@@ -103,6 +128,10 @@ export default function CompPanel({ item }) {
   const gm = { A: 1.0, B: 0.75, C: 0.45, D: 0.15 }[grade] || 0.75;
   const medians = [ebay?.stats?.median, web?.stats?.median].filter(Boolean);
   const recommended = medians.length > 0 ? Math.round((medians.reduce((a, b) => a + b, 0) / medians.length) * gm) : null;
+
+  const onRecRef = useRef(onRecommend);
+  onRecRef.current = onRecommend;
+  useEffect(() => { if (onRecRef.current) onRecRef.current(recommended || 0); }, [recommended]);
 
   const tabBtn = (id, label, badge) => (
     <button onClick={() => setTab(id)} style={{
@@ -140,6 +169,7 @@ export default function CompPanel({ item }) {
           <span style={{ marginRight: 6 }}>[=]</span>
           Market Comps
           {recommended && <span style={{ marginLeft: 8, color: "#059669", fontFamily: "monospace" }}>~${recommended.toLocaleString()}</span>}
+          {(ebay?._broad || web?._broad) && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#a16207" }}>broad match</span>}
           {ebay?.stats && <span style={{ marginLeft: 6, fontSize: 11, color: "#94a3b8" }}>({ebay.stats.count} eBay)</span>}
         </span>
         <span style={{ fontSize: 16, color: "#94a3b8" }}>{open ? "\u25B2" : "\u25BC"}</span>

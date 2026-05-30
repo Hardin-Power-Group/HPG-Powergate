@@ -218,6 +218,11 @@ function facilityOf(code){
   if(c.startsWith("SA"))return "SA";
   return "";
 }
+/* Enclosure types that can contain child breakers (panelboards, switchgear, MCCs). */
+function isEnclosureType(t){
+  const s=String(t||"").toLowerCase();
+  return s.includes("panel")||s.includes("switchgear")||s.includes("switchboard")||s.includes("mcc")||s.includes("motor control");
+}
 const GRD=[{v:"A",c:"#16a34a",d:"Excellent"},{v:"B",c:"#2563eb",d:"Good"},{v:"C",c:"#f59e0b",d:"Fair"},{v:"D",c:"#dc2626",d:"Scrap"}];
 const gc={};GRD.forEach(g=>gc[g.v]=g.c);
 const DISP=[{v:"unassigned",l:"Unassigned",c:"#6b7280"},{v:"resale",l:"Resale",c:"#2563eb"},{v:"deman",l:"Deman",c:"#8b5cf6"},{v:"ebay",l:"eBay",c:"#16a34a"},{v:"skid",l:"Skid Build",c:"#0891b2"},{v:"scrap",l:"Scrap",c:"#dc2626"}];
@@ -1598,7 +1603,7 @@ ${header}
     nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",phase:"3",kvaRating:"",kvaForced:"",windingMaterial:"",windingHv:"",windingLv:"",interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
     frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",catalogNumber:"",
     busRating:"",shortCircuitRating:"",bilKv:"",voltageClass:"",numSections:"",busMaterial:"",switchgearType:"",
-    disposition:"unassigned",estimatedResale:0,estimatedScrap:0,
+    disposition:"unassigned",estimatedResale:0,estimatedScrap:0,compWorth:0,
     ebayCompAvg:0,priceBookValue:0,estimatedWeight:0,
     conditionNotes:"",photos:[],missing:[],breakers:[],
     acquisitionCost:"",refurbCost:"",askingPrice:"",
@@ -1662,6 +1667,51 @@ ${header}
   const totalRevenue=totalResale+totalScrap;
   const grossProfit=totalRevenue-totalCOGS;
   const marginPct=totalRevenue>0?(grossProfit/totalRevenue*100):0;
+
+  /* Worth-vs-COGS worksheet (internal bid guidance, decommission resale economics).
+     Worth = entered resale if set, else the comp recommendation. COGS = acquisition + refurb. */
+  const itemWorth=(it)=>{const r=parseFloat(it.estimatedResale)||0;return r>0?r:(parseFloat(it.compWorth)||0);};
+  const itemCogs=(it)=>(parseFloat(it.acquisitionCost)||0)+(parseFloat(it.refurbCost)||0);
+  const resaleItems=items.filter(i=>i.disposition!=="scrap"&&!i._review);
+  const totalWorth=resaleItems.reduce((a,i)=>a+itemWorth(i)*i.quantity,0);
+  const totalItemCogs=resaleItems.reduce((a,i)=>a+itemCogs(i)*i.quantity,0);
+  const worthSpread=totalWorth-totalItemCogs;
+  const worthMarkup=totalItemCogs>0?(worthSpread/totalItemCogs*100):null;
+  const worthMargin=totalWorth>0?(worthSpread/totalWorth*100):null;
+  const removalCost=totalCOGS;
+
+  const sendToQuote=async()=>{
+    if(!job.customerName){setMsg({t:"error",m:"Customer name is required before sending to quote."});return;}
+    if(resaleItems.length===0){setMsg({t:"error",m:"No resale items to quote."});return;}
+    setSv(true);setMsg({t:"info",m:"Drafting quote..."});
+    try{
+      const qn=`HPG-DQ-${new Date().toISOString().slice(0,10).replace(/-/g,"")}-${Math.random().toString(36).slice(2,5).toUpperCase()}`;
+      const quoteRow={
+        quote_number:qn,
+        customer:job.customerName,
+        date:job.bidDate||new Date().toISOString().slice(0,10),
+        status:"draft",
+        notes:job.notes||null,
+        target_pct:worthMarkup!=null?Math.round(worthMarkup*100)/100:null,
+        target_basis:"markup",
+        cogs_total:Math.round(totalItemCogs*100)/100,
+        sell_total:Math.round(totalWorth*100)/100,
+        labor_status:null,
+      };
+      const ins=await dbF("wes_quotes",{method:"POST",body:JSON.stringify(quoteRow)});
+      const quoteId=Array.isArray(ins)?(ins[0]&&ins[0].id):(ins&&ins.id);
+      if(!quoteId)throw new Error("quote insert returned no id");
+      const scopeMap={};
+      resaleItems.forEach(it=>{const t=it.equipmentType||"Equipment";scopeMap[t]=(scopeMap[t]||0)+(parseInt(it.quantity)||1);});
+      const lines=[];let so=0;
+      Object.keys(scopeMap).forEach(t=>{const n=scopeMap[t];lines.push({quote_id:quoteId,sort_order:so++,item_type:"scope",description:`Remove ${n} ${t}${n>1?"s":""}`,qty:n,unit:null,unit_price:null,amount:null,unit_cost:null,line_routing:"decommission"});});
+      lines.push({quote_id:quoteId,sort_order:so++,item_type:"labor",description:"Decommission labor",qty:null,unit:"hr",unit_price:null,amount:null,unit_cost:null,line_routing:"decommission"});
+      await dbF("wes_quote_lines",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(lines)});
+      setMsg({t:"success",m:`Quote ${qn} drafted: ${Object.keys(scopeMap).length} scope line(s), blank labor line. Set the bid price in the Costing app.`});
+    }catch(e){setMsg({t:"error",m:"Send to Quote failed: "+e.message});}
+    setSv(false);
+  };
+
   const targetMargin=parseFloat(job.targetMargin)||45;
   const meetsMargin=marginPct>=targetMargin;
 
@@ -2264,9 +2314,15 @@ ${header}
               <div><button onClick={()=>fetchEbay(i)} style={{width:"100%",padding:"10px 0",borderRadius:8,border:"1px solid #16a34a",background:"#fff",color:"#16a34a",fontWeight:700,fontSize:11,cursor:"pointer",marginTop:18}}>eBay{it.ebayCompAvg>0?` $${it.ebayCompAvg.toFixed(0)}`:""}</button></div>
             </div>
 
-            <CompPanel item={{equipmentType:it.equipmentType,manufacturer:it.manufacturer,modelNumber:it.modelNumber,catalogNumber:it.catalogNumber,amperageRating:it.amperageRating,kvaRating:it.kvaRating,voltageRating:it.voltageRating,grade:it.grade}} />
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1.4fr",gap:8,marginBottom:8}}>
+              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Acq $</label><input style={inpSm} type="number" step="0.01" value={it.acquisitionCost} onChange={e=>uItem(i,"acquisitionCost",e.target.value)} placeholder="0"/></div>
+              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Refurb $</label><input style={inpSm} type="number" step="0.01" value={it.refurbCost} onChange={e=>uItem(i,"refurbCost",e.target.value)} placeholder="0"/></div>
+              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Worth vs COGS</label><div style={{...inpSm,background:"#f8fafc",color:"#475569",display:"flex",alignItems:"center",gap:6,fontSize:11}}><span style={{fontWeight:700,color:"#16a34a"}}>${itemWorth(it).toFixed(0)}</span><span style={{color:"#94a3b8"}}>/</span><span style={{fontWeight:700}}>${itemCogs(it).toFixed(0)}</span>{itemCogs(it)>0&&<span style={{marginLeft:"auto",fontWeight:700,color:(itemWorth(it)-itemCogs(it))>0?"#16a34a":"#dc2626"}}>{Math.round((itemWorth(it)-itemCogs(it))/itemCogs(it)*100)}%</span>}</div>{parseFloat(it.estimatedResale)>0?null:(parseFloat(it.compWorth)>0?<div style={{fontSize:9,color:"#a16207"}}>worth from comp</div>:null)}</div>
+            </div>
 
-            <Section title="BREAKERS" badge={`${(it.breakers||[]).reduce((a,b)=>a+(b.count||0),0)} total`} color="#0369a1">
+            <CompPanel item={{equipmentType:it.equipmentType,manufacturer:it.manufacturer,modelNumber:it.modelNumber,catalogNumber:it.catalogNumber,amperageRating:it.amperageRating,kvaRating:it.kvaRating,voltageRating:it.voltageRating,grade:it.grade}} onRecommend={v=>{if((parseFloat(it.compWorth)||0)!==(v||0))uItem(i,"compWorth",v||0);}} />
+
+            {isEnclosureType(it.equipmentType)&&<Section title="BREAKERS" badge={`${(it.breakers||[]).reduce((a,b)=>a+(b.count||0),0)} total`} color="#0369a1">
             <div style={{background:"#f0f9ff",borderRadius:10,padding:12,marginBottom:0,border:"1px solid #bae6fd"}}>
               <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8}}>
                 <button onClick={()=>addBreaker(i)} style={{padding:"6px 12px",borderRadius:6,border:"none",background:"#0369a1",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>+ Add</button>
@@ -2294,7 +2350,7 @@ ${header}
                 </div>
               ))}
             </div>
-            </Section>
+            </Section>}
 
             <Section title="Missing Components" badge={`${(it.missing||[]).length}`} color="#dc2626">
             <div style={{marginBottom:0}}>
@@ -2316,14 +2372,22 @@ ${header}
 
         {catalogScanIdx!==null&&<BarcodeScanner label="Scan Catalog / Model Barcode" onScan={v=>{setItems(prev=>prev.map((it,j)=>j===catalogScanIdx?{...it,catalogNumber:v,modelNumber:v}:it));setMsg({t:"success",m:"Scanned: "+v});setCatalogScanIdx(null);}} onClose={()=>setCatalogScanIdx(null)}/>}
 
-        {mode!=="receive"&&items.length>0&&<div style={{...card,background:meetsMargin?"#ecfdf5":"#fef2f2",border:`2px solid ${meetsMargin?"#a7f3d0":"#fecaca"}`}}>
-          <div style={{fontSize:15,fontWeight:800,marginBottom:10,color:meetsMargin?"#065f46":"#991b1b"}}>{meetsMargin?"Bid Summary":"Below "+targetMargin+"% Margin"}</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:8}}>
-            <div><div style={{fontSize:10,color:"#6b7280"}}>COGS</div><div style={{fontSize:15,fontWeight:800}}>${totalCOGS.toFixed(0)}</div></div>
-            <div><div style={{fontSize:10,color:"#6b7280"}}>Revenue</div><div style={{fontSize:15,fontWeight:800,color:"#16a34a"}}>${totalRevenue.toFixed(0)}</div></div>
-            <div><div style={{fontSize:10,color:"#6b7280"}}>Profit</div><div style={{fontSize:15,fontWeight:800,color:grossProfit>0?"#16a34a":"#dc2626"}}>${grossProfit.toFixed(0)}</div></div>
+        {mode!=="receive"&&items.length>0&&<div style={{...card,background:"#f8fafc",border:"2px solid #cbd5e1"}}>
+          <div style={{fontSize:15,fontWeight:800,marginBottom:10,color:"#1e293b"}}>Bid Worksheet</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Recovery Worth</div><div style={{fontSize:16,fontWeight:800,color:"#16a34a"}}>${totalWorth.toFixed(0)}</div></div>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Item COGS</div><div style={{fontSize:16,fontWeight:800}}>${totalItemCogs.toFixed(0)}</div></div>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Spread</div><div style={{fontSize:16,fontWeight:800,color:worthSpread>0?"#16a34a":"#dc2626"}}>${worthSpread.toFixed(0)}</div></div>
           </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:4}}>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Markup</div><div style={{fontSize:14,fontWeight:800,color:"#1e293b"}}>{worthMarkup!=null?`${worthMarkup.toFixed(0)}%`:"--"}</div></div>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Margin</div><div style={{fontSize:14,fontWeight:800,color:"#1e293b"}}>{worthMargin!=null?`${worthMargin.toFixed(0)}%`:"--"}</div></div>
+            <div><div style={{fontSize:10,color:"#6b7280"}}>Removal (labor+transport)</div><div style={{fontSize:14,fontWeight:800,color:"#475569"}}>${removalCost.toFixed(0)}</div></div>
+          </div>
+          <div style={{fontSize:10,color:"#94a3b8",marginTop:6}}>Internal guidance only. Worth is resale recovery; COGS is acquisition + refurb. The customer bid price is set by hand on the quote.</div>
         </div>}
+
+        {mode!=="receive"&&items.length>0&&<button onClick={sendToQuote} disabled={sv} style={{width:"100%",boxSizing:"border-box",padding:14,borderRadius:12,border:"none",background:sv?"#94a3b8":"#0891b2",color:"#fff",fontSize:14,fontWeight:800,cursor:sv?"not-allowed":"pointer",marginBottom:8}}>{sv?"Working...":"Send to Quote (draft)"}</button>}
 
         <div style={{display:"flex",gap:8,marginBottom:8}}>
           <button onClick={handleSubmit} disabled={sv} style={{flex:2,padding:16,borderRadius:12,border:"none",background:sv?"#94a3b8":"linear-gradient(135deg,#3d5e3f,#1e293b)",color:"#fff",fontSize:16,fontWeight:800,cursor:sv?"not-allowed":"pointer"}}>{sv?"Saving...":"Save"}</button>
