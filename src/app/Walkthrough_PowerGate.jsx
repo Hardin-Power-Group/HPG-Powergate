@@ -1576,7 +1576,7 @@ ${header}
           <span style={{fontSize:15,fontWeight:800}}>Equipment ({items.length})</span>
           <button onClick={addItem} style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>+ Add Item</button>
           <label style={{padding:"10px 16px",borderRadius:8,border:"none",background:"#7c3aed",color:"#fff",fontWeight:700,fontSize:14,cursor:bulkBusy?"wait":"pointer",opacity:bulkBusy?0.6:1,marginLeft:8,display:"inline-block"}}>
-            <input type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.bmp" multiple disabled={!!bulkBusy} style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";handleWalkthroughBulkIntake(fs);}}/>
+            <input type="file" multiple disabled={!!bulkBusy} style={{display:"none"}} onChange={e=>{const fs=e.target.files;e.target.value="";handleWalkthroughBulkIntake(fs);}}/>
             + Bulk Photo Intake
           </label>
           {bulkBusy&&<div style={{marginLeft:12,padding:"6px 12px",borderRadius:8,background:"#fef3c7",color:"#92400e",fontSize:12,fontWeight:700,display:"inline-block"}}>
