@@ -998,7 +998,8 @@ ${header}
       const p=await resp.json();
       if(p.error)throw new Error(p.error);
 
-      // 3. Group AI components: switchgear/panel parents host breakers as sub-array
+      // 3. Group AI components: aggregate breakers by spec (amp + poles + manufacturer)
+      // so a panel of 34 breakers collapses to ~6 rows with quantity.
       const all=p.components||[];
       if(all.length===0){setMsg({t:"error",m:"AI returned no equipment. Try clearer photos or use + Add Item."});setBulkBusy(null);return;}
       const isBreaker=(c)=>{const t=(c.equipment_type||"").toLowerCase();return t.includes("breaker");};
@@ -1012,20 +1013,24 @@ ${header}
         if(!n||n<1||n>uploaded.length)return null;
         return uploaded[n-1].photoUrl;
       };
-      // If there is no detected parent, treat breakers as standalone items
-      const hostParent=parents[0]||null;
-      const breakerSubArray=hostParent?breakers.map(b=>({
-        amp:String(b.amperage||"20").replace(/[^0-9]/g,"")||"20",
-        count:1,
-        poles:String(b.poles||"1").replace(/[^0-9]/g,"")||"1",
-        grade:b.grade||"B",
-        oem:"oem",
-        pitting:false,contactWear:false,
-        notes:[b.position?`Pos ${b.position}`:"",b.manufacturer||"",b.model_or_type||"",b.notes||""].filter(Boolean).join(" / "),
-      })):[];
+      // Group breakers by manufacturer + amperage + poles into quantity rows
+      const normAmp=(v)=>String(v||"").replace(/[^0-9]/g,"")||"";
+      const normPoles=(v)=>{const n=String(v||"").replace(/[^0-9]/g,"");return n?n:"1";};
+      const breakerGroups={};
+      for(const b of breakers){
+        const mfr=(b.manufacturer||"").trim();
+        const amp=normAmp(b.amperage);
+        const poles=normPoles(b.poles);
+        const key=`${mfr.toLowerCase()}|${amp}|${poles}`;
+        if(!breakerGroups[key])breakerGroups[key]={mfr,amp,poles,count:0,samples:[],photo:null,grade:b.grade||"C",model:b.model_or_type||""};
+        breakerGroups[key].count++;
+        if(b.position)breakerGroups[key].samples.push(b.position);
+        if(!breakerGroups[key].photo){const pu=photoFor(b);if(pu)breakerGroups[key].photo=pu;}
+      }
+      const groupedBreakerRows=Object.values(breakerGroups);
 
-      // 4. Build new items list (one per detected unit), preserving existing items
-      const buildRow=(c,extraBreakers)=>{
+      // 4. Build rows. Build a "synthetic" panel row if breakers were detected without a parent.
+      const buildRow=(c,extraBreakers,overrideQty)=>{
         const photoUrl=photoFor(c);
         return {
           equipmentType:c.equipment_type||"",
@@ -1035,7 +1040,7 @@ ${header}
           serialNumber:"",
           voltageRating:c.voltage||"",
           amperageRating:String(c.amperage||"").replace(/[^0-9]/g,""),
-          quantity:1,grade:c.grade||"C",
+          quantity:overrideQty||1,grade:c.grade||"C",
           nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",
           phase:"3",kvaRating:"",kvaForced:"",
           windingMaterial:"",windingHv:"",windingLv:"",
@@ -1052,16 +1057,43 @@ ${header}
           pickupStatus:"pending",destination:"main_warehouse",
         };
       };
+      // Build a row from a breaker group with proper quantity
+      const buildBreakerGroupRow=(g)=>({
+        equipmentType:"Circuit Breaker",
+        manufacturer:g.mfr||"",
+        modelNumber:g.model||"",
+        catalogNumber:g.model||"",
+        serialNumber:"",
+        voltageRating:"",
+        amperageRating:g.amp,
+        quantity:g.count,
+        grade:g.grade||"C",
+        nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",
+        phase:g.poles==="3"?"3":g.poles==="2"?"1":"1",kvaRating:"",kvaForced:"",
+        windingMaterial:"",windingHv:"",windingLv:"",
+        interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
+        frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",
+        busRating:"",shortCircuitRating:"",bilKv:"",voltageClass:"",numSections:"",busMaterial:"",switchgearType:"",
+        disposition:"unassigned",estimatedResale:0,estimatedScrap:0,
+        ebayCompAvg:0,priceBookValue:0,estimatedWeight:0,
+        conditionNotes:`${g.poles}-pole. ${g.count} qty${g.samples.length?` (positions: ${g.samples.slice(0,8).join(",")}${g.samples.length>8?"...":""})`:""}`,
+        photos:g.photo?[g.photo]:[],
+        missing:[],breakers:[],
+        acquisitionCost:"",refurbCost:"",askingPrice:"",
+        barcodeSku:"",putawayLocation:"",putawayQty:1,skidId:"",
+        pickupStatus:"pending",destination:"main_warehouse",
+      });
       const newRows=[];
-      if(hostParent){
-        // First detected parent gets all breakers as its sub-array
-        newRows.push(buildRow(hostParent,breakerSubArray));
-        // Any other detected parents become their own rows with no breakers attached
-        for(let i=1;i<parents.length;i++)newRows.push(buildRow(parents[i],[]));
-      }else{
-        // No parent detected: every breaker becomes its own standalone row
-        for(const b of breakers)newRows.push(buildRow(b,[]));
+      // Real detected parents become their own rows (one per parent, no nested breakers)
+      for(const par of parents)newRows.push(buildRow(par,[]));
+      // If breakers were found but no parent was detected, synthesize a Panel row so the enclosure is captured
+      if(breakers.length>0&&parents.length===0){
+        const firstBreakerMfr=breakers.find(b=>b.manufacturer)?.manufacturer||"";
+        newRows.push(buildRow({equipment_type:"Panelboard",manufacturer:firstBreakerMfr,grade:"C",notes:`Synthesized parent for ${breakers.length} breakers detected without explicit panel ID`},[],1));
       }
+      // Grouped breaker rows, one per (mfr, amp, poles) combination
+      for(const g of groupedBreakerRows)newRows.push(buildBreakerGroupRow(g));
+      // Other equipment (transformers, etc.) - one row each
       for(const o of others)newRows.push(buildRow(o,[]));
 
       // 5. Apply auto-derivations (price book, scrap, weight) mirroring uItem's logic
@@ -1078,8 +1110,9 @@ ${header}
         return u;
       });
       setItems(prev=>[...prev,...enriched]);
-      const summary=hostParent
-        ?`${enriched.length} item${enriched.length===1?"":"s"} added (${breakerSubArray.length} breakers nested in ${hostParent.equipment_type||"parent"})`
+      const totalBreakers=breakers.length;
+      const summary=totalBreakers>0
+        ?`${enriched.length} row${enriched.length===1?"":"s"} added (${totalBreakers} breakers grouped into ${groupedBreakerRows.length} type${groupedBreakerRows.length===1?"":"s"}${parents.length===0?", panel synthesized":""})`
         :`${enriched.length} item${enriched.length===1?"":"s"} added`;
       setMsg({t:"success",m:summary});
     }catch(e){
