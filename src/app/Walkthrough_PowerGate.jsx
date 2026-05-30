@@ -634,6 +634,7 @@ export default function Walkthrough() {
 
   const [job,setJob]=useState({jobName:"",customerName:"",siteAddress:"",preparedBy:"",bidDate:today(),laborHours:"",laborRate:"75",transportCost:"",targetMargin:"45",notes:""});
   const [items,setItems]=useState([]);
+  const [compSlots,setCompSlots]=useState(3); // throttle: how many items may auto-fetch comps concurrently
   const [errs,setErrs]=useState({});
 
   const [qcPhase,setQcPhase]=useState("location");
@@ -2117,16 +2118,16 @@ ${header}
         </div>}
 
         {mode!=="receive"&&<div style={card}>
-          <div style={{fontSize:15,fontWeight:800,marginBottom:12}}>Acquisition Costs</div>
+          <div style={{fontSize:15,fontWeight:800,marginBottom:12}}>Removal Cost</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
             <div><label style={lbl}>Labor Hrs</label><input style={inp} type="number" value={job.laborHours} onChange={e=>uf("laborHours",e.target.value)}/></div>
             <div><label style={lbl}>$/Hr</label><input style={inp} type="number" value={job.laborRate} onChange={e=>uf("laborRate",e.target.value)}/></div>
             <div><label style={lbl}>Transport</label><input style={inp} type="number" value={job.transportCost} onChange={e=>uf("transportCost",e.target.value)}/></div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>LABOR</div><div style={{fontSize:16,fontWeight:800}}>${laborCost.toFixed(0)}</div></div>
-            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>TOTAL COGS</div><div style={{fontSize:16,fontWeight:800}}>${totalCOGS.toFixed(0)}</div></div>
-            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>MARGIN</div><div style={{fontSize:16,fontWeight:800,color:meetsMargin?"#16a34a":"#dc2626"}}>{items.length>0?`${marginPct.toFixed(0)}%`:"--"}</div></div>
+            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>REMOVAL</div><div style={{fontSize:16,fontWeight:800}}>${removalCost.toFixed(0)}</div></div>
+            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>RECOVERY WORTH</div><div style={{fontSize:16,fontWeight:800,color:"#16a34a"}}>{items.length>0?`$${totalWorth.toFixed(0)}`:"--"}</div></div>
+            <div style={{background:"#f8fafc",borderRadius:8,padding:10,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#6b7280"}}>SPREAD vs COGS</div><div style={{fontSize:16,fontWeight:800,color:worthSpread>0?"#16a34a":"#dc2626"}}>{items.length>0?`$${worthSpread.toFixed(0)}`:"--"}</div></div>
           </div>
         </div>}
 
@@ -2320,7 +2321,7 @@ ${header}
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Worth vs COGS</label><div style={{...inpSm,background:"#f8fafc",color:"#475569",display:"flex",alignItems:"center",gap:6,fontSize:11}}><span style={{fontWeight:700,color:"#16a34a"}}>${itemWorth(it).toFixed(0)}</span><span style={{color:"#94a3b8"}}>/</span><span style={{fontWeight:700}}>${itemCogs(it).toFixed(0)}</span>{itemCogs(it)>0&&<span style={{marginLeft:"auto",fontWeight:700,color:(itemWorth(it)-itemCogs(it))>0?"#16a34a":"#dc2626"}}>{Math.round((itemWorth(it)-itemCogs(it))/itemCogs(it)*100)}%</span>}</div>{parseFloat(it.estimatedResale)>0?null:(parseFloat(it.compWorth)>0?<div style={{fontSize:9,color:"#a16207"}}>worth from comp</div>:null)}</div>
             </div>
 
-            <CompPanel item={{equipmentType:it.equipmentType,manufacturer:it.manufacturer,modelNumber:it.modelNumber,catalogNumber:it.catalogNumber,amperageRating:it.amperageRating,kvaRating:it.kvaRating,voltageRating:it.voltageRating,grade:it.grade}} onRecommend={v=>{if((parseFloat(it.compWorth)||0)!==(v||0))uItem(i,"compWorth",v||0);}} />
+            <CompPanel item={{equipmentType:it.equipmentType,manufacturer:it.manufacturer,modelNumber:it.modelNumber,catalogNumber:it.catalogNumber,amperageRating:it.amperageRating,kvaRating:it.kvaRating,voltageRating:it.voltageRating,grade:it.grade}} autoStart={i<compSlots} onRecommend={v=>{if((parseFloat(it.compWorth)||0)!==(v||0))uItem(i,"compWorth",v||0);if(i>=compSlots-1)setCompSlots(s=>Math.max(s,i+2));}} />
 
             {isEnclosureType(it.equipmentType)&&<Section title="BREAKERS" badge={`${(it.breakers||[]).reduce((a,b)=>a+(b.count||0),0)} total`} color="#0369a1">
             <div style={{background:"#f0f9ff",borderRadius:10,padding:12,marginBottom:0,border:"1px solid #bae6fd"}}>

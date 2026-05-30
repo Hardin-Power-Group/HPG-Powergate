@@ -70,7 +70,7 @@ function CompItem({ comp, source }) {
   );
 }
 
-export default function CompPanel({ item, onRecommend }) {
+export default function CompPanel({ item, onRecommend, autoStart = false }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("ebay");
   const [ebay, setEbay] = useState(null);
@@ -121,8 +121,8 @@ export default function CompPanel({ item, onRecommend }) {
   }, [hasData, fetchEbay, fetchWeb]);
 
   useEffect(() => {
-    if (open && !fetched && hasData) fetchAll();
-  }, [open, fetched, hasData, fetchAll]);
+    if ((open || autoStart) && !fetched && hasData) fetchAll();
+  }, [open, autoStart, fetched, hasData, fetchAll]);
 
   const grade = item?.grade || "B";
   const gm = { A: 1.0, B: 0.75, C: 0.45, D: 0.15 }[grade] || 0.75;
@@ -131,7 +131,15 @@ export default function CompPanel({ item, onRecommend }) {
 
   const onRecRef = useRef(onRecommend);
   onRecRef.current = onRecommend;
-  useEffect(() => { if (onRecRef.current) onRecRef.current(recommended || 0); }, [recommended]);
+  const reportedRef = useRef(false);
+  /* Report worth back to the parent exactly once the comp state settles:
+     after a fetch completes (fetched true, both requests done) or when the
+     item lacks enough data to fetch at all. This drives the parent throttle. */
+  useEffect(() => {
+    if (reportedRef.current) { if (onRecRef.current) onRecRef.current(recommended || 0); return; }
+    const settled = (!hasData) || (fetched && !loading.ebay && !loading.web);
+    if (settled) { reportedRef.current = true; if (onRecRef.current) onRecRef.current(recommended || 0); }
+  }, [recommended, fetched, hasData, loading.ebay, loading.web]);
 
   const tabBtn = (id, label, badge) => (
     <button onClick={() => setTab(id)} style={{
