@@ -173,6 +173,13 @@ function MovePanel({facility,count,busy,onPick}){
 
 /* -- Constants ------------------------------------------- */
 const EQ=["Switchgear","Panelboard","Transformer","Circuit Breaker","Motor Control Center (MCC)","Bus Duct","Disconnect Switch","UPS System","PDU","RPP (Remote Power Panel)","ATS / Transfer Switch","VFD / Drive","Motor Starter","Control Transformer","Trip Unit","Relay","CT / PT","Meter","Bin Breaker","Mounting Kit","Gasket","Bus Bar","Wire","Inner","Nuts and Bolts","Other"];
+/* Non-electrical receivables (supplies, tools, facility, etc.). Alphabetical. These have no
+   nameplate or catalog, so each requires a typed description (see DESC_REQUIRED). */
+const NON_EQ=["Coatings / Paint / Blast Media","Consumables","Equipment","Event Supplies","Facility","Fleet Parts","IT / Office Electronics","Janitorial / Sanitation","Marketing","Packaging / Shipping","PPE","Rigging","Safety / Compliance","Tools"];
+/* Electrical types for the dropdown, alphabetical, with Other moved to the non-electrical group. */
+const EQ_ELECTRICAL=EQ.filter(t=>t!=="Other").slice().sort((a,b)=>a.localeCompare(b));
+/* Types that require a free-text description before save (no catalog/nameplate identity). */
+const DESC_REQUIRED=new Set([...NON_EQ,"Other"]);
 const BULK_TYPES=new Set(["Bin Breaker","Mounting Kit","Gasket","Bus Bar","Wire","Inner","Nuts and Bolts"]);
 const ENUM_PARENT_TYPES=new Set(["Motor Control Center (MCC)","Switchgear","Panelboard"]);
 const MFR=["Eaton / Cutler-Hammer","Siemens","Square D / Schneider","ABB","GE","Westinghouse","ITE","Federal Pacific","Allen-Bradley / Rockwell","Mitsubishi","Yaskawa","Danfoss","Liebert / Vertiv","APC / Schneider","ABL Sursum","Other"];
@@ -255,7 +262,13 @@ function Section({title,children,badge,defaultOpen=false,color="#475569"}){
 }
 
 /* -- Photo compression ----------------------------------- */
-function compressImage(file,maxW=1200,quality=0.7){
+/* Single capture profile for every image sent to an AI scan (nameplate, breaker lineup,
+   comps). The vision API downscales to ~1568px longest edge server-side, so going past
+   ~3000px adds upload weight without adding read accuracy. High quality matters more than
+   raw dimension: keep small nameplate text free of compression artifacts. */
+const SCAN_MAX_PX=3000;
+const SCAN_QUALITY=0.95;
+function compressImage(file,maxW=SCAN_MAX_PX,quality=SCAN_QUALITY){
   return new Promise((res)=>{
     const reader=new FileReader();
     reader.onload=(e)=>{
@@ -293,7 +306,7 @@ function BarcodeScanner({onScan,onClose,label}){
       const det=new BarcodeDetector({formats:["code_128","code_39","ean_13","ean_8","qr_code","upc_a","upc_e","codabar","itf","data_matrix"]});
       (async()=>{
         try{
-          stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1920},height:{ideal:1080}}});
+          stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:4096},height:{ideal:2160}}});
           if(videoRef.current){videoRef.current.srcObject=stream;setReady(true);}
           const scan=async()=>{
             if(!videoRef.current||videoRef.current.readyState<2){animId=requestAnimationFrame(scan);return;}
@@ -781,7 +794,7 @@ export default function Walkthrough() {
     if(!file)return;
     setQcPhase("analyzing");setMsg(null);
     try{
-      const compressed=await compressImage(file,2576,0.92);
+      const compressed=await compressImage(file,SCAN_MAX_PX,SCAN_QUALITY);
       const b64=compressed.split(",")[1];
       let photoUrl=compressed;
       const upPromise=(async()=>{
@@ -834,6 +847,7 @@ export default function Walkthrough() {
     if(mode==="quick"&&!qcLocationCode.trim()){setMsg({t:"error",m:"Set location first"});setQcPhase("location");return;}
     if(mode==="receive"&&!job.preparedBy.trim()){setMsg({t:"error",m:"Received By required"});setQcPhase("location");return;}
     if(!qcItem.equipmentType){setMsg({t:"error",m:"Pick an equipment type"});return;}
+    if(DESC_REQUIRED.has(qcItem.equipmentType)&&!(qcItem.itemDescription||"").trim()){setMsg({t:"error",m:"Description required for "+qcItem.equipmentType});setQcPhase("review");return;}
     setQcPhase("saving");
     try{
       const invId=newInvId();
@@ -846,6 +860,7 @@ export default function Walkthrough() {
         serial_number:isBulk?null:(sn||"UNKNOWN"),
         model_number:qcItem.modelNumber||null,catalog_number:qcItem.catalogNumber||null,
         manufacturer:qcItem.manufacturer||null,equipment_type:qcItem.equipmentType,
+        item_description:(qcItem.itemDescription||"").trim()||null,
         voltage_rating:qcItem.voltageRating||null,amperage_rating:qcItem.amperageRating||null,
         grade:qcItem.grade||"C",location:"main_warehouse",
         location_detail:mode==="quick"?qcLocationCode.trim():null,
@@ -900,7 +915,7 @@ export default function Walkthrough() {
     if(!file)return;
     setMsg(null);
     try{
-      const compressed=await compressImage(file,2576,0.92);
+      const compressed=await compressImage(file,SCAN_MAX_PX,SCAN_QUALITY);
       const b64=compressed.split(",")[1];
       const entry={dataUrl:compressed,b64,photoUrl:compressed,uploading:true};
       setEnumPhotos(prev=>[...prev,entry]);
@@ -986,6 +1001,7 @@ export default function Walkthrough() {
 
   const handleEnumerateSave=async()=>{
     if(!qcItem){setMsg({t:"error",m:"No parent item"});return;}
+    if(DESC_REQUIRED.has(qcItem.equipmentType)&&!(qcItem.itemDescription||"").trim()){setMsg({t:"error",m:"Description required for "+qcItem.equipmentType});setQcPhase("review");return;}
     if(enumComponents.length===0){setMsg({t:"error",m:"No components to save. Add at least one or cancel."});return;}
     setQcPhase("enumerate_saving");
     try{
@@ -999,6 +1015,7 @@ export default function Walkthrough() {
         serial_number:sn||"UNKNOWN",
         model_number:qcItem.modelNumber||null,catalog_number:qcItem.catalogNumber||null,
         manufacturer:qcItem.manufacturer||null,equipment_type:qcItem.equipmentType,
+        item_description:(qcItem.itemDescription||"").trim()||null,
         voltage_rating:qcItem.voltageRating||null,amperage_rating:qcItem.amperageRating||null,
         grade:qcItem.grade||"C",location:"main_warehouse",
         location_detail:mode==="quick"?qcLocationCode.trim():null,
@@ -1319,7 +1336,7 @@ ${header}
         const file=files[i];
         setBulkBusy({step:"upload",progress:i,total:files.length});
         try{
-          const compressed=await compressImage(file,2576,0.9);
+          const compressed=await compressImage(file,SCAN_MAX_PX,SCAN_QUALITY);
           if(!compressed||!compressed.startsWith("data:"))throw new Error("compression returned no data");
           const b64=compressed.split(",")[1];
           let photoUrl=null;
@@ -1599,7 +1616,7 @@ ${header}
   };
 
   const addItem=()=>setItems(p=>[...p,{
-    equipmentType:"",manufacturer:"",mfrInferred:false,modelNumber:"",serialNumber:"",
+    equipmentType:"",manufacturer:"",mfrInferred:false,modelNumber:"",serialNumber:"",itemDescription:"",
     voltageRating:"",amperageRating:"",quantity:1,grade:"C",
     nemaRating:"",indoorOutdoor:"indoor",yearMfg:"",phase:"3",kvaRating:"",kvaForced:"",windingMaterial:"",windingHv:"",windingLv:"",interruptRating:"",coolingClass:"",liquidType:"",nameplateWeight:"",
     frameSize:"",tripRating:"",breakerType:"",tripUnitType:"",mountingType:"",catalogNumber:"",
@@ -1759,6 +1776,8 @@ ${header}
     if(mode==="receive"){if(!job.preparedBy?.trim())e.preparedBy="Required";}
     else{if(!job.jobName.trim())e.jobName="Required";if(!job.customerName.trim())e.customerName="Required";}
     if(items.length===0)e.items="Add at least one item";
+    const missingDesc=items.findIndex(it=>DESC_REQUIRED.has(it.equipmentType)&&!(it.itemDescription||"").trim());
+    if(missingDesc>=0){e.items=`Item ${missingDesc+1}: description required for ${items[missingDesc].equipmentType}`;setMsg({t:"error",m:e.items});}
     setErrs(e);return Object.keys(e).length===0;
   };
 
@@ -1778,6 +1797,7 @@ ${header}
           qty:isBulk?(parseInt(it.quantity)||1):1,
           serial_number:isBulk?null:(sn||"UNKNOWN"),
           model_number:it.modelNumber||null,manufacturer:it.manufacturer||null,equipment_type:it.equipmentType,
+          item_description:(it.itemDescription||"").trim()||null,
           voltage_rating:it.voltageRating||null,amperage_rating:it.amperageRating||null,
           grade:it.grade,condition_notes:[it.conditionNotes,bkrDetail?`Breakers: ${bkrDetail}`:""].filter(Boolean).join(" | ")||null,
           location:it.destination||"main_warehouse",
@@ -2216,9 +2236,13 @@ ${header}
             </div>}
 
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Type</label><select style={inpSm} value={it.equipmentType} onChange={e=>uItem(i,"equipmentType",e.target.value)}><option value="">Select</option>{EQ.map(t=><option key={t}>{t}</option>)}</select></div>
+              <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Type</label><select style={inpSm} value={it.equipmentType} onChange={e=>uItem(i,"equipmentType",e.target.value)}><option value="">Select</option>{EQ_ELECTRICAL.map(t=><option key={t}>{t}</option>)}<option value="Other">Other</option></select></div>
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Mfr{it.mfrInferred?<span style={{color:"#a16207",fontWeight:700}}> . inferred</span>:""}</label><select style={it.mfrInferred?{...inpSm,borderColor:"#f59e0b",background:"#fffbeb"}:inpSm} value={it.manufacturer} onChange={e=>{uItem(i,"manufacturer",e.target.value);uItem(i,"mfrInferred",false);}}><option value="">Select</option>{MFR.map(m=><option key={m}>{m}</option>)}</select></div>
             </div>
+            {it.equipmentType==="Other"&&<div style={{marginBottom:8}}>
+              <label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Description * <span style={{color:"#94a3b8",fontWeight:400}}>({(it.itemDescription||"").length}/100)</span></label>
+              <input style={(it.itemDescription||"").trim()?inpSm:{...inpSm,borderColor:"#dc2626",background:"#fef2f2"}} maxLength={100} value={it.itemDescription||""} onChange={e=>uItem(i,"itemDescription",e.target.value)} placeholder="Required: what is this item?"/>
+            </div>}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:8}}>
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>S/N</label><input style={inpSm} value={it.serialNumber} onChange={e=>{uItem(i,"serialNumber",e.target.value);if(e.target.value.trim())uItem(i,"quantity",1);}}/></div>
               <div><label style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>Model</label><input style={inpSm} value={it.modelNumber} onChange={e=>uItem(i,"modelNumber",e.target.value)}/></div>
@@ -2527,9 +2551,19 @@ ${header}
               <label style={lbl}>Type *</label>
               <select style={qcItem.equipmentType?inp:inpE} value={qcItem.equipmentType} onChange={e=>setQcItem(i=>({...i,equipmentType:e.target.value}))}>
                 <option value="">-- pick --</option>
-                {EQ.map(t=><option key={t} value={t}>{t}{BULK_TYPES.has(t)?" (bulk)":""}{ENUM_PARENT_TYPES.has(t)?" (enumerable)":""}</option>)}
+                <optgroup label="Electrical">
+                  {EQ_ELECTRICAL.map(t=><option key={t} value={t}>{t}{BULK_TYPES.has(t)?" (bulk)":""}{ENUM_PARENT_TYPES.has(t)?" (enumerable)":""}</option>)}
+                </optgroup>
+                <optgroup label="Non-Electrical">
+                  {NON_EQ.map(t=><option key={t} value={t}>{t}</option>)}
+                  <option value="Other">Other</option>
+                </optgroup>
               </select>
             </div>
+            {DESC_REQUIRED.has(qcItem.equipmentType)&&<div style={{marginBottom:10}}>
+              <label style={lbl}>Description * <span style={{color:"#94a3b8",fontWeight:400}}>({(qcItem.itemDescription||"").length}/100)</span></label>
+              <input style={(qcItem.itemDescription||"").trim()?inp:inpE} maxLength={100} value={qcItem.itemDescription||""} onChange={e=>setQcItem(i=>({...i,itemDescription:e.target.value}))} placeholder="Required: what is this item?"/>
+            </div>}
             <div style={{marginBottom:10}}>
               <label style={lbl}>Manufacturer</label>
               <select style={inp} value={MFR.includes(qcItem.manufacturer)?qcItem.manufacturer:""} onChange={e=>setQcItem(i=>({...i,manufacturer:e.target.value}))}>
